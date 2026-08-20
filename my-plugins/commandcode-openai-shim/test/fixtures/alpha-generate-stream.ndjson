@@ -1,0 +1,41 @@
+{"type":"start"}
+{"type":"start-step","request":{"body":{"note":"system prompt do servidor omitido no fixture"}},"warnings":[]}
+{"type":"reasoning-start","id":"reasoning-0","providerMetadata":{"gateway":{"generationId":"gen_01M0E1G39VNYRNRZVR4FYDH7QZ"}}}
+{"type":"reasoning-delta","id":"reasoning-0","text":"O"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" usu"}
+{"type":"reasoning-delta","id":"reasoning-0","text":"ário"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" ped"}
+{"type":"reasoning-delta","id":"reasoning-0","text":"iu"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" apenas"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" para"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" dizer"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" \""}
+{"type":"reasoning-delta","id":"reasoning-0","text":"ok"}
+{"type":"reasoning-delta","id":"reasoning-0","text":"\"."}
+{"type":"reasoning-delta","id":"reasoning-0","text":" V"}
+{"type":"reasoning-delta","id":"reasoning-0","text":"ou"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" responder"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" de"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" forma"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" dire"}
+{"type":"reasoning-delta","id":"reasoning-0","text":"ta"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" e"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" conc"}
+{"type":"reasoning-delta","id":"reasoning-0","text":"isa"}
+{"type":"reasoning-delta","id":"reasoning-0","text":","}
+{"type":"reasoning-delta","id":"reasoning-0","text":" conforme"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" as"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" reg"}
+{"type":"reasoning-delta","id":"reasoning-0","text":"ras"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" de"}
+{"type":"reasoning-delta","id":"reasoning-0","text":" verb"}
+{"type":"reasoning-delta","id":"reasoning-0","text":"os"}
+{"type":"reasoning-delta","id":"reasoning-0","text":"idade"}
+{"type":"reasoning-delta","id":"reasoning-0","text":"."}
+{"type":"text-start","id":"txt-0"}
+{"type":"reasoning-end","id":"reasoning-0"}
+{"type":"text-delta","id":"txt-0","text":"ok"}
+{"type":"text-end","id":"txt-0"}
+{"type":"finish-step","finishReason":"stop","rawFinishReason":"stop","usage":{"inputTokens":7641,"inputTokenDetails":{"noCacheTokens":89,"cacheReadTokens":7552},"outputTokens":33,"outputTokenDetails":{"textTokens":2,"reasoningTokens":31},"totalTokens":7674,"raw":{"prompt_tokens":7641,"completion_tokens":33,"prompt_cache_hit_tokens":7552,"prompt_cache_miss_tokens":89,"total_tokens":7674,"completion_tokens_details":{"reasoning_tokens":31}},"reasoningTokens":31,"cachedInputTokens":7552},"providerMetadata":{"deepseek":{"promptCacheHitTokens":7552,"promptCacheMissTokens":89},"gateway":{"routing":{"originalModelId":"deepseek/deepseek-v4-flash","resolvedProvider":"deepseek","fallbacksAvailable":[],"planningReasoning":"Provider set restricted to: deepseek. System credentials planned for: deepseek. Team preference: system credentials attempted before BYOK credentials. Total execution order: deepseek(system)","canonicalSlug":"deepseek/deepseek-v4-flash","finalProvider":"deepseek","modelAttemptCount":1,"modelAttempts":[{"canonicalSlug":"deepseek/deepseek-v4-flash","success":true,"providerAttemptCount":1,"providerAttempts":[{"provider":"deepseek","credentialType":"system","success":true,"startTime":1787177733463,"endTime":1787177734669,"providerRequestId":"bac93a33636af9096e01d4650855be9c","statusCode":200,"providerResponseId":"a6a3f795-da8b-457e-b604-27a5ef582d68"}]}],"totalProviderAttemptCount":1,"sort":{"option":"ttft","executionOrder":["deepseek","deepseek"],"metrics":{"deepseek":1783},"deprioritizedProviders":[]}},"cost":"0.000094224","marketCost":"0.000094224","surchargeCost":"0","gatewayCost":"0.000094224","inferenceCost":"0.000094224","inputInferenceCost":"0.000072444","outputInferenceCost":"0.00002178","generationId":"gen_01M0E1G39VNYRNRZVR4FYDH7QZ"}},"response":{"id":"a6a3f795-da8b-457e-b604-27a5ef582d68","timestamp":"2026-08-19T22:15:33.000Z","modelId":"deepseek-v4-flash","headers":{"access-control-allow-headers":"Content-Type, Authorization, ai-gateway-auth-method, ai-gateway-protocol-version, ai-model-id, ai-language-model-id, ai-language-model-specification-version, ai-image-model-specification-version, ai-embedding-model-specification-version, ai-language-model-streaming, ai-reporting-tags, ai-reporting-user, http-referer, x-title, anthropic-beta, x-vercel-ai-gateway-team, x-session-id, x-session-affinity","access-control-allow-methods":"GET, POST, PUT, PATCH, DELETE, OPTIONS","access-control-allow-origin":"*","cache-control":"no-cache, no-transform","cf-cache-status":"DYNAMIC","cf-ray":"a2dc847e086cb8fb-JDO","connection":"close","content-type":"text/event-stream","date":"Wed, 19 Aug 2026 22:15:34 GMT","server":"cloudflare","set-cookie":"_vcrr_9ae7f6aec35bf5b1=dpl_91E4Ze4YWHteVz1gbiZKFVEKT6yu|0.2007; Path=/; Secure; HttpOnly; SameSite=None","strict-transport-security":"max-age=63072000; includeSubDomains; preload","transfer-encoding":"chunked","vary":"rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch","x-effective-store":"false","x-generation-id":"gen_01M0E1G39VNYRNRZVR4FYDH7QZ","x-matched-path":"/v3/ai/language-model","x-model-id":"deepseek/deepseek-v4-flash","x-vercel-cache":"MISS","x-vercel-id":"gru1::iad1::fxj42-1787177733245-2ef23fbf2b15"}}}
+{"type":"finish","finishReason":"stop","rawFinishReason":"stop","totalUsage":{"inputTokens":7641,"inputTokenDetails":{"noCacheTokens":89,"cacheReadTokens":7552},"outputTokens":33,"outputTokenDetails":{"textTokens":2,"reasoningTokens":31},"totalTokens":7674,"reasoningTokens":31,"cachedInputTokens":7552}}
+{"type":"provider-metadata","providerMetadata":{"deepseek":{"promptCacheHitTokens":7552,"promptCacheMissTokens":89},"gateway":{"routing":{"originalModelId":"deepseek/deepseek-v4-flash","resolvedProvider":"deepseek","fallbacksAvailable":[],"planningReasoning":"Provider set restricted to: deepseek. System credentials planned for: deepseek. Team preference: system credentials attempted before BYOK credentials. Total execution order: deepseek(system)","canonicalSlug":"deepseek/deepseek-v4-flash","finalProvider":"deepseek","modelAttemptCount":1,"modelAttempts":[{"canonicalSlug":"deepseek/deepseek-v4-flash","success":true,"providerAttemptCount":1,"providerAttempts":[{"provider":"deepseek","credentialType":"system","success":true,"startTime":1787177733463,"endTime":1787177734669,"providerRequestId":"bac93a33636af9096e01d4650855be9c","statusCode":200,"providerResponseId":"a6a3f795-da8b-457e-b604-27a5ef582d68"}]}],"totalProviderAttemptCount":1,"sort":{"option":"ttft","executionOrder":["deepseek","deepseek"],"metrics":{"deepseek":1783},"deprioritizedProviders":[]}},"cost":"0.000094224","marketCost":"0.000094224","surchargeCost":"0","gatewayCost":"0.000094224","inferenceCost":"0.000094224","inputInferenceCost":"0.000072444","outputInferenceCost":"0.00002178","generationId":"gen_01M0E1G39VNYRNRZVR4FYDH7QZ"}}}

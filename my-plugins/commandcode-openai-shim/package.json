@@ -1,0 +1,15 @@
+{
+  "name": "commandcode-openai-shim",
+  "version": "0.1.0",
+  "description": "Traduz OpenAI chat/completions para a API da Command Code",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "src/server.mjs",
+  "scripts": {
+    "start": "node src/main.mjs",
+    "test": "node --test"
+  }
+}
