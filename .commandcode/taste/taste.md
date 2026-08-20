@@ -1,0 +1,1 @@
+- Comunica-se em português brasileiro e espera respostas/diagnósticos no mesmo idioma. Confidence: 0.95

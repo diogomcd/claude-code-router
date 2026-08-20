@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(sqlite3:*)",
+      "Shell(sqlite3 ~/.claude-code-router/config.sqlite \"SELECT sql FROM sqlite_master WHERE name='app_config';\" 2>&1; echo \"---\"; sqlite3 ~/.claude-code-router/config.sqlite \"SELECT * FROM app_config LIMIT 1;\" 2>&1 | head -c 5000)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}
