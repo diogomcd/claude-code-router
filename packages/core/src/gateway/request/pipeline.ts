@@ -32,6 +32,7 @@ import { recordProviderCredentialOutcome } from "@ccr/core/providers/credential-
 import { codexApplyPatchBridgeResponseStream, prepareCodexApplyPatchBridgeRequest } from "@ccr/core/gateway/features/codex-patch-bridge";
 import { codexMultiAgentBridgeResponseStream, prepareCodexMultiAgentBridgeRequest } from "@ccr/core/gateway/features/codex-multi-agent-bridge";
 import { rewriteAnthropicMessageStartModelStream, shouldRewriteAnthropicMessageStartModel } from "@ccr/core/gateway/features/anthropic-response-model";
+import { declaredToolNames, repairToolNamesResponseStream, shouldRepairToolNames } from "@ccr/core/gateway/features/tool-name-repair";
 import { prepareCursorOpenAICompatChatBody } from "@ccr/core/gateway/features/cursor-compat";
 import { filteredResponseHeaders, formatError, formatUpstreamErrorForLog, forwardHeaders, inferGatewayClient, readRequestBody, sendJson, shouldCaptureGatewayUsage, shouldSendBody, stripLocalGatewayAuthHeaders } from "@ccr/core/gateway/http/io";
 import { serializeJsonBody, takeJsonObject } from "@ccr/core/gateway/http/body";
@@ -753,12 +754,17 @@ export class GatewayRequestPipeline {
       ) {
         responseHeaders.delete("content-length");
       }
+      const clientDeclaredToolNames = upstreamResponse.ok ? declaredToolNames(requestBody) : [];
+      const repairResponseToolNames = shouldRepairToolNames({
+        contentType: responseHeaders.get("content-type") ?? undefined,
+        toolNames: clientDeclaredToolNames
+      });
       const rewriteAnthropicResponseModel = upstreamResponse.ok && shouldRewriteAnthropicMessageStartModel({
         contentType: responseHeaders.get("content-type") ?? undefined,
         model: clientVisibleResponseModel,
         protocol: responseProtocol
       });
-      if (codexApplyPatchBridgeActive || codexMultiAgentBridgeActive || appendContextArchiveFooter || transformCodexCompactResponse || rewriteAnthropicResponseModel) {
+      if (codexApplyPatchBridgeActive || codexMultiAgentBridgeActive || appendContextArchiveFooter || transformCodexCompactResponse || repairResponseToolNames || rewriteAnthropicResponseModel) {
         responseHeaders.delete("content-length");
       }
       recordProviderCredentialOutcome(this.config, method, upstreamResult.attempt, upstreamResponse.status, responseHeaders);
@@ -820,10 +826,13 @@ export class GatewayRequestPipeline {
               codexCompactCompatResponseMode
             )
           : hostedWebSearchResponseBody;
-      const clientResponseBody = rewriteAnthropicResponseModel && clientVisibleResponseModel
-        ? rewriteAnthropicMessageStartModelStream(responseBody, clientVisibleResponseModel)
+      const toolNameRepairedBody = repairResponseToolNames
+        ? repairToolNamesResponseStream(responseBody, responseHeaders.get("content-type") ?? undefined, clientDeclaredToolNames)
         : responseBody;
-      const responseStreams = uniqueStreams([upstreamBody, patchedResponseBody, multiAgentResponseBody, hostedWebSearchResponseBody, responseBody, clientResponseBody]);
+      const clientResponseBody = rewriteAnthropicResponseModel && clientVisibleResponseModel
+        ? rewriteAnthropicMessageStartModelStream(toolNameRepairedBody, clientVisibleResponseModel)
+        : toolNameRepairedBody;
+      const responseStreams = uniqueStreams([upstreamBody, patchedResponseBody, multiAgentResponseBody, hostedWebSearchResponseBody, responseBody, toolNameRepairedBody, clientResponseBody]);
       const sampler = createBodySampler();
       const sseErrorDetector = createSseErrorDetector(responseHeaders.get("content-type") ?? undefined);
       let streamDetectedError: string | undefined;
