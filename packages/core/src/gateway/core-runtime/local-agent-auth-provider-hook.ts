@@ -1,4 +1,4 @@
-import { readClaudeCodeOauth, readGrokAuth, readKimiAuth, resolveGrokAuth, resolveKimiAuth } from "@ccr/core/agents/local-providers/service";
+import { antigravityAccessTokenExpired, antigravityIdentityHeaders, readAntigravityAuth, readClaudeCodeOauth, readGrokAuth, readKimiAuth, resolveAntigravityAuth, resolveGrokAuth, resolveKimiAuth } from "@ccr/core/agents/local-providers/service";
 import { grokAccessTokenExpired, grokClientVersion } from "@ccr/core/agents/local-providers/grok";
 import { kimiAccessTokenExpired, kimiIdentityHeaders } from "@ccr/core/agents/local-providers/kimi";
 import { transformCodexApplyPatchBridgeRequestBody } from "@ccr/core/gateway/features/codex-patch-bridge";
@@ -41,9 +41,23 @@ type ProviderHook = {
   provider?: string;
   providerName?: string;
   transformRequest?: (input: ProviderPluginInput) => Promise<ProviderHookResult> | ProviderHookResult;
+  transformResponse?: (input: ProviderPayloadHookInput) => Promise<ProviderPayloadHookResult> | ProviderPayloadHookResult;
 };
 
-type LocalAgentOauthKind = "claude-code" | "grok" | "kimi";
+type ProviderPayloadHookInput = {
+  request?: ProviderPluginInput["request"];
+  upstreamPayload?: unknown;
+};
+
+type ProviderPayloadHookResult = {
+  ok: true;
+  value: unknown;
+} | {
+  error: string;
+  ok: false;
+};
+
+type LocalAgentOauthKind = "antigravity" | "claude-code" | "grok" | "kimi";
 
 export function createGatewayPlugin(input: { config?: Record<string, unknown> } = {}) {
   return {
@@ -81,6 +95,13 @@ function localAgentOauthProviderHook(plugin: unknown): ProviderHook | undefined 
     providerName: stringValue(plugin.providerName)
   };
 
+  if (kind === "antigravity") {
+    hook.authenticate = (input) => authenticateWithBearer(input, () => resolveLiveAntigravityAccessToken(plugin), plugin, "Antigravity access token was not found.");
+    hook.transformRequest = (input) => transformAntigravityRequest(input, plugin);
+    hook.transformResponse = transformAntigravityResponse;
+    return hook;
+  }
+
   if (kind === "grok") {
     hook.authenticate = (input) => authenticateWithBearer(input, () => resolveLiveGrokAccessToken(plugin), plugin, "Grok CLI access token was not found.");
     hook.transformRequest = (input) => transformGrokRequest(input, plugin);
@@ -101,6 +122,9 @@ function localAgentOauthKind(plugin: Record<string, unknown>): LocalAgentOauthKi
   const key = stringValue(plugin.key)?.toLowerCase();
   if (!key?.startsWith(localAgentProviderPluginKeyPrefix)) {
     return undefined;
+  }
+  if (key.includes("antigravity-oauth")) {
+    return "antigravity";
   }
   if (key.includes("grok-cli-oauth")) {
     return "grok";
@@ -164,6 +188,14 @@ async function resolveLiveGrokAccessToken(plugin: Record<string, unknown>): Prom
   return originalBearerToken(plugin);
 }
 
+async function resolveLiveAntigravityAccessToken(plugin: Record<string, unknown>): Promise<string | undefined> {
+  const auth = await resolveAntigravityAuth().catch(() => readAntigravityAuth());
+  if (auth?.accessToken && !antigravityAccessTokenExpired(auth)) {
+    return auth.accessToken;
+  }
+  return originalBearerToken(plugin);
+}
+
 async function resolveLiveKimiAccessToken(plugin: Record<string, unknown>): Promise<string | undefined> {
   const reference = kimiOauthReference(plugin);
   const auth = await resolveKimiAuth(reference).catch(() => readKimiAuth(reference));
@@ -184,6 +216,45 @@ function transformWithHeaders(input: ProviderPluginInput, headers: HeaderRecord)
       }
     }
   };
+}
+
+function transformAntigravityRequest(input: ProviderPluginInput, plugin: Record<string, unknown>): ProviderHookResult {
+  const url = new URL(input.upstreamRequest.url);
+  const [pathModel, action = "generateContent"] = decodeURIComponent(url.pathname.split("/models/")[1] ?? "").split(":");
+  const model = input.model || pathModel;
+  const project = antigravityOauthProject(plugin);
+  const body = isRecord(input.upstreamRequest.body) ? input.upstreamRequest.body : {};
+  return {
+    ok: true,
+    value: {
+      ...input.upstreamRequest,
+      body: {
+        cloudaicompanion_project: project,
+        model,
+        project,
+        request: body
+      },
+      headers: {
+        ...(input.upstreamRequest.headers ?? {}),
+        ...antigravityIdentityHeaders()
+      },
+      method: "POST",
+      url: `${url.origin}/v1internal:${action}`
+    }
+  };
+}
+
+function transformAntigravityResponse(input: ProviderPayloadHookInput): ProviderPayloadHookResult {
+  const payload = input.upstreamPayload;
+  if (!isRecord(payload) || !isRecord(payload.response)) {
+    return { ok: true, value: payload };
+  }
+  return { ok: true, value: payload.response };
+}
+
+function antigravityOauthProject(plugin: Record<string, unknown>): string {
+  const oauth = plugin.antigravityOauth;
+  return isRecord(oauth) && typeof oauth.project === "string" ? oauth.project : "";
 }
 
 function transformGrokRequest(input: ProviderPluginInput, plugin: Record<string, unknown>): ProviderHookResult {

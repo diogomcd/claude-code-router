@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -134,6 +134,107 @@ test("Grok local agent request hook removes unsupported Responses tools and stal
   assert.equal(requestResult.value.body.parallel_tool_calls, true);
 });
 
+test("local agent OAuth detector recognizes the Antigravity plugin and exposes its config hook key", () => {
+  const plugin = antigravityOauthProviderPlugin();
+  assert.equal(isLocalAgentOauthProviderPlugin(plugin), true);
+
+  const [hook] = createGatewayPlugin({
+    config: {
+      providerPlugins: [plugin]
+    }
+  }).providerHooks;
+  assert.equal(hook.key, "config:ccr-local-agent-x-antigravity-oauth");
+});
+
+test("Antigravity local agent auth hook injects the live Bearer token and drops x-api-key", async (t) => {
+  await withAntigravityHome(t, async (antigravityHome) => {
+    writeAntigravityAuth(antigravityHome, {
+      access_token: "live-antigravity-access-token",
+      expiry_date: Date.now() + 3_600_000,
+      refresh_token: "antigravity-refresh-token"
+    });
+
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      throw new Error("unexpected Antigravity token refresh");
+    };
+    t.after(() => {
+      globalThis.fetch = previousFetch;
+    });
+
+    const [hook] = createGatewayPlugin({
+      config: {
+        providerPlugins: [antigravityOauthProviderPlugin()]
+      }
+    }).providerHooks;
+    const upstreamRequest = {
+      body: { contents: [] },
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "client-key"
+      },
+      method: "POST",
+      url: "https://daily-cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent?key=SECRET"
+    };
+
+    const authResult = await hook.authenticate({ upstreamRequest });
+
+    assert.equal(authResult.ok, true);
+    assert.equal(authResult.value.headers.authorization, "Bearer live-antigravity-access-token");
+    assert.equal(authResult.value.headers["x-api-key"], undefined);
+    assert.equal(upstreamRequest.headers["x-api-key"], "client-key");
+  });
+});
+
+test("Antigravity local agent request hook wraps the public Gemini call into v1internal", () => {
+  const plugin = antigravityOauthProviderPlugin();
+  const [hook] = createGatewayPlugin({
+    config: {
+      providerPlugins: [plugin]
+    }
+  }).providerHooks;
+
+  const requestResult = hook.transformRequest({
+    upstreamRequest: {
+      body: { contents: [] },
+      headers: {
+        "content-type": "application/json"
+      },
+      method: "POST",
+      url: "https://daily-cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent?key=SECRET"
+    }
+  });
+
+  assert.equal(requestResult.ok, true);
+  assert.equal(requestResult.value.url, "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent");
+  assert.equal(requestResult.value.url.includes("key="), false);
+  assert.equal(requestResult.value.body.cloudaicompanion_project, "proj-123");
+  assert.equal(requestResult.value.body.project, "proj-123");
+  assert.equal(requestResult.value.body.model, "gemini-3-pro-preview");
+  assert.deepEqual(requestResult.value.body.request, { contents: [] });
+  assert.match(requestResult.value.headers["user-agent"], /^antigravity-ide\//);
+});
+
+test("Antigravity local agent response hook unwraps only the internal response envelope", async () => {
+  const [hook] = createGatewayPlugin({
+    config: {
+      providerPlugins: [antigravityOauthProviderPlugin()]
+    }
+  }).providerHooks;
+
+  const unwrapped = await hook.transformResponse({
+    upstreamPayload: { response: { candidates: [1] } }
+  });
+  assert.equal(unwrapped.ok, true);
+  assert.deepEqual(unwrapped.value, { candidates: [1] });
+
+  const passthrough = await hook.transformResponse({
+    upstreamPayload: { foo: 1 }
+  });
+  assert.equal(passthrough.ok, true);
+  assert.deepEqual(passthrough.value, { foo: 1 });
+});
+
 test("core gateway config installs the local agent dynamic auth runtime hook when OAuth plugins are present", async () => {
   const config = createDefaultAppConfig();
   config.providerPlugins = [grokOauthProviderPlugin()];
@@ -262,4 +363,42 @@ function writeGrokAuth(grokHome, auth) {
   writeFileSync(path.join(grokHome, "auth.json"), JSON.stringify({
     "https://auth.x.ai::test-account": auth
   }, null, 2));
+}
+
+function antigravityOauthProviderPlugin() {
+  return {
+    antigravityOauth: {
+      project: "proj-123"
+    },
+    auth: {
+      headers: {
+        authorization: "Bearer imported-stale-token"
+      },
+      removeHeaders: ["x-api-key"],
+      strict: true
+    },
+    key: "ccr-local-agent-x-antigravity-oauth",
+    providerName: "Antigravity"
+  };
+}
+
+async function withAntigravityHome(t, run) {
+  const previousInternalHome = process.env.CCR_INTERNAL_HOME_DIR;
+  const previousOauthFile = process.env.CCR_ANTIGRAVITY_OAUTH_FILE;
+  const antigravityHome = mkdtempSync(path.join(os.tmpdir(), "ccr-antigravity-hook-test-"));
+  process.env.CCR_INTERNAL_HOME_DIR = antigravityHome;
+  delete process.env.CCR_ANTIGRAVITY_OAUTH_FILE;
+  try {
+    await run(antigravityHome);
+  } finally {
+    restoreEnv("CCR_INTERNAL_HOME_DIR", previousInternalHome);
+    restoreEnv("CCR_ANTIGRAVITY_OAUTH_FILE", previousOauthFile);
+    rmSync(antigravityHome, { force: true, recursive: true });
+  }
+}
+
+function writeAntigravityAuth(antigravityHome, auth) {
+  const geminiDir = path.join(antigravityHome, ".gemini");
+  mkdirSync(geminiDir, { recursive: true });
+  writeFileSync(path.join(geminiDir, "oauth_creds.json"), JSON.stringify(auth, null, 2));
 }
