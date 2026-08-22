@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
@@ -21,14 +22,18 @@ import {
 export const antigravityDefaultBaseUrl = "https://daily-cloudcode-pa.googleapis.com";
 export const antigravityOAuthTokenUrl = "https://oauth2.googleapis.com/token";
 
-const antigravityOauthClientId = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
-const antigravityOauthClientSecret = "";
+const antigravityOauthClientId = "884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com";
+const antigravityOauthClientSecret = "REDACTED";
 const antigravityIdeVersion = "1.0.0";
 const antigravityRefreshTimeoutMs = 20_000;
 const accessTokenExpiryMarginMs = 60_000;
 const secondsToMillisecondsThreshold = 1e12;
 
-const antigravityFallbackModels = ["gemini-3-pro-preview", "gemini-3-flash", "claude-sonnet-4-5"];
+const antigravityKeyringService = "gemini";
+const antigravityKeyringUsername = "antigravity";
+const antigravityKeyringTimeoutMs = 5_000;
+
+const antigravityFallbackModels = ["gemini-3.1-pro-low", "gemini-3.6-flash-high", "claude-sonnet-4-6"];
 const antigravityCandidateId = "antigravity-ide";
 const antigravityProviderName = "Antigravity";
 const antigravityProtocol = "gemini_generate_content" as const;
@@ -101,27 +106,18 @@ export async function loadAntigravityProject(accessToken: string): Promise<strin
 }
 
 export async function fetchAntigravityModels(
-  accessToken: string,
-  project?: string
+  accessToken: string
 ): Promise<Array<{ id: string; displayName?: string }>> {
-  const payload = await postAntigravityInternal("fetchAvailableModels", accessToken, {
-    ...(project ? { cloudaicompanionProject: project, project } : {}),
-    metadata: {}
-  });
-  const models = (payload?.models ?? (payload?.data as Record<string, unknown> | undefined)?.models) as unknown;
-  if (!Array.isArray(models)) {
+  const payload = await postAntigravityInternal("fetchAvailableModels", accessToken, { metadata: {} });
+  const models = payload?.models;
+  if (!isPlainRecord(models)) {
     return [];
   }
-  return models.flatMap((entry) => {
-    if (!entry || typeof entry !== "object") {
-      return [];
-    }
-    const record = entry as Record<string, unknown>;
-    const id = readString(record.id) || readString(record.name) || readString(record.model);
+  return Object.entries(models).flatMap(([id, meta]) => {
     if (!id) {
       return [];
     }
-    const displayName = readString(record.displayName) || readString(record.display_name);
+    const displayName = isPlainRecord(meta) ? readString(meta.displayName) : undefined;
     return [{ id, ...(displayName ? { displayName } : {}) }];
   });
 }
@@ -172,7 +168,7 @@ export async function importAntigravityProvider(
     throw new Error("Antigravity login was not found or is expired.");
   }
   const project = await loadAntigravityProject(auth.accessToken);
-  const discovered = await fetchAntigravityModels(auth.accessToken, project);
+  const discovered = await fetchAntigravityModels(auth.accessToken);
   const models = uniqueStrings([
     ...discovered.map((model) => model.id),
     ...antigravityFallbackModels
@@ -266,6 +262,50 @@ export function readAntigravityAuth(sourceFile?: string): AntigravityTokenSet | 
   };
 }
 
+export const antigravityKeyringSourceFile = `keyring:${antigravityKeyringService}/${antigravityKeyringUsername}`;
+
+export function readAntigravityKeyringAuth(): AntigravityTokenSet | undefined {
+  let output = "";
+  try {
+    output = execFileSync("secret-tool", ["search", "--all", "service", antigravityKeyringService], {
+      encoding: "utf8",
+      timeout: antigravityKeyringTimeoutMs
+    });
+  } catch {
+    return undefined;
+  }
+  for (const block of output.split(/\n\s*\n/)) {
+    if (!block.includes(`attribute.username = ${antigravityKeyringUsername}`)) {
+      continue;
+    }
+    const secret = block.match(/^secret = (.+)$/m)?.[1];
+    const token = secret ? parseRecord(secret)?.token : undefined;
+    if (!isPlainRecord(token)) {
+      continue;
+    }
+    const accessToken = readString(token.access_token);
+    if (!accessToken) {
+      continue;
+    }
+    return {
+      accessToken,
+      expiryDate: normalizeKeyringExpiry(token.expiry),
+      refreshToken: readString(token.refresh_token),
+      sourceFile: antigravityKeyringSourceFile
+    };
+  }
+  return undefined;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeKeyringExpiry(value: unknown): number | undefined {
+  const parsed = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 export function antigravityAccessTokenExpired(auth: AntigravityTokenSet): boolean {
   return auth.expiryDate === undefined || auth.expiryDate <= Date.now() + accessTokenExpiryMarginMs;
 }
@@ -273,7 +313,7 @@ export function antigravityAccessTokenExpired(auth: AntigravityTokenSet): boolea
 export async function resolveAntigravityAuth(
   reference?: { sourceFile?: string }
 ): Promise<AntigravityTokenSet | undefined> {
-  const auth = readAntigravityAuth(reference?.sourceFile);
+  const auth = liveAntigravityAuth(reference?.sourceFile);
   if (!auth?.refreshToken || !antigravityAccessTokenExpired(auth)) {
     return auth;
   }
@@ -290,12 +330,22 @@ export async function resolveAntigravityAuth(
   return refresh;
 }
 
+function liveAntigravityAuth(sourceFile?: string): AntigravityTokenSet | undefined {
+  const fileAuth = readAntigravityAuth(sourceFile);
+  if (fileAuth?.accessToken && !antigravityAccessTokenExpired(fileAuth)) {
+    return fileAuth;
+  }
+  return readAntigravityKeyringAuth() ?? fileAuth;
+}
+
 function adoptPeerRotatedAntigravityAuth(
   auth: AntigravityTokenSet,
   error: unknown
 ): AntigravityTokenSet | undefined {
   if (error instanceof AntigravityRefreshRejectedError) {
-    const latest = readAntigravityAuth(auth.sourceFile);
+    const latest = liveAntigravityAuth(
+      auth.sourceFile === antigravityKeyringSourceFile ? undefined : auth.sourceFile
+    );
     if (latest?.accessToken && !antigravityAccessTokenExpired(latest)) {
       return latest;
     }
@@ -348,7 +398,9 @@ async function refreshAntigravityAuth(auth: AntigravityTokenSet): Promise<Antigr
       refreshToken: readString(payload?.refresh_token) || readString(payload?.refreshToken) || auth.refreshToken,
       scope: readString(payload?.scope) || auth.scope
     };
-    persistAntigravityAuth(refreshed);
+    if (refreshed.sourceFile !== antigravityKeyringSourceFile) {
+      persistAntigravityAuth(refreshed);
+    }
     return refreshed;
   } finally {
     clearTimeout(timer);

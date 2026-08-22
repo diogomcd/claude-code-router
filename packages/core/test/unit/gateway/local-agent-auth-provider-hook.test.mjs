@@ -208,7 +208,7 @@ test("Antigravity local agent request hook wraps the public Gemini call into v1i
   assert.equal(requestResult.ok, true);
   assert.equal(requestResult.value.url, "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent");
   assert.equal(requestResult.value.url.includes("key="), false);
-  assert.equal(requestResult.value.body.cloudaicompanion_project, "proj-123");
+  assert.ok(requestResult.value.body.cloudaicompanion_project === undefined, "cloudaicompanion_project não deve existir no body");
   assert.equal(requestResult.value.body.project, "proj-123");
   assert.equal(requestResult.value.body.model, "gemini-3-pro-preview");
   assert.deepEqual(requestResult.value.body.request, { contents: [] });

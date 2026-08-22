@@ -152,7 +152,8 @@ test("Antigravity resolve refreshes an expired token and rewrites the credential
         assert.equal(calls[0].url, antigravityOAuthTokenUrl);
         assert.equal(calls[0].init?.method, "POST");
         assert.match(calls[0].init?.body ?? "", /grant_type=refresh_token/);
-        assert.match(calls[0].init?.body ?? "", /681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j/);
+        assert.match(calls[0].init?.body ?? "", /884354919052-36trc1jjb3tguiac32ov6cod268c5blh/);
+        assert.match(calls[0].init?.body ?? "", /REDACTED/);
 
         const persisted = JSON.parse(readFileSync(file, "utf8"));
         assert.equal(persisted.access_token, "fresh-access-token");
@@ -324,17 +325,16 @@ test("Antigravity project discovery returns an empty project instead of throwing
 test("Antigravity model catalog parses the internal payload and tolerates failures", async () => {
   await withStubbedFetch(
     () => new Response(JSON.stringify({
-      models: [
-        { displayName: "Gemini 3 Pro", id: "gemini-3-pro-preview" },
-        { id: "claude-sonnet-4-5" },
-        { displayName: "ignored" }
-      ]
+      models: {
+        "gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro Low" },
+        "claude-sonnet-4-6": {}
+      }
     }), { headers: { "content-type": "application/json" }, status: 200 }),
     async (calls) => {
-      const models = await fetchAntigravityModels("catalog-token", "projects/ccr-antigravity");
-      assert.deepEqual(models, [
-        { displayName: "Gemini 3 Pro", id: "gemini-3-pro-preview" },
-        { id: "claude-sonnet-4-5" }
+      const models = await fetchAntigravityModels("catalog-token");
+      assert.deepEqual(models.sort((a,b) => a.id.localeCompare(b.id)), [
+        { id: "claude-sonnet-4-6" },
+        { displayName: "Gemini 3.1 Pro Low", id: "gemini-3.1-pro-low" }
       ]);
       assert.equal(calls[0].url, `${antigravityDefaultBaseUrl}/v1internal:fetchAvailableModels`);
     }
@@ -382,7 +382,7 @@ test("Antigravity import builds the gateway provider payload and both auth plugi
             status: 200
           });
         }
-        return new Response(JSON.stringify({ models: [{ displayName: "Gemini 3 Pro", id: "gemini-3-pro-preview" }] }), {
+        return new Response(JSON.stringify({ models: { "gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro Low" } } }), {
           headers: { "content-type": "application/json" },
           status: 200
         });
@@ -393,8 +393,8 @@ test("Antigravity import builds the gateway provider payload and both auth plugi
         assert.equal(result.provider.baseUrl, antigravityDefaultBaseUrl);
         assert.equal(result.provider.protocol, "gemini_generate_content");
         assert.equal(result.provider.apiKey, localAgentProviderApiKey);
-        assert.ok(result.provider.models.includes("gemini-3-pro-preview"));
-        assert.ok(result.provider.models.includes("claude-sonnet-4-5"));
+        assert.ok(result.provider.models.includes("gemini-3.1-pro-low"));
+        assert.ok(result.provider.models.includes("claude-sonnet-4-6"));
         assert.equal(result.providerPlugins.length, 2);
         assert.ok(String(result.providerPlugins[0].key).endsWith("-antigravity-oauth"));
         assert.ok(String(result.providerPlugins[1].key).endsWith("-antigravity-oauth-internal"));

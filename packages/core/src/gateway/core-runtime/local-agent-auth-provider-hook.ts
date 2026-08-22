@@ -229,7 +229,6 @@ function transformAntigravityRequest(input: ProviderPluginInput, plugin: Record<
     value: {
       ...input.upstreamRequest,
       body: {
-        cloudaicompanion_project: project,
         model,
         project,
         request: body

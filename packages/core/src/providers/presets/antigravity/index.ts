@@ -3,7 +3,7 @@ import { defaultProviderAccountConfig, type ProviderPreset } from "@ccr/core/pro
 export const antigravityProviderPreset: ProviderPreset = {
   account: defaultProviderAccountConfig,
   aliases: ["antigravity", "google antigravity", "cloudcode"],
-  defaultModels: ["gemini-3-pro-preview", "gemini-3-flash", "claude-sonnet-4-5"],
+  defaultModels: ["gemini-3.1-pro-low", "gemini-3.6-flash-high", "claude-sonnet-4-6"],
   endpoints: [
     {
       baseUrl: "https://daily-cloudcode-pa.googleapis.com",
