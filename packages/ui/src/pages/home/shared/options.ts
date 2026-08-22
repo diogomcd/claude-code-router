@@ -115,6 +115,7 @@ export const agentAnalysisRangeOptions: Array<{ label: string; value: UsageStats
 
 export const agentFilterOptions: Array<{ label: string; value: AgentFilterValue }> = [
   { label: "All agents", value: "all" },
+  { label: "Antigravity", value: "antigravity" },
   { label: "Claude Code", value: "claude-code" },
   { label: "Codex", value: "codex" },
   { label: "Grok CLI", value: "grok" },
@@ -131,6 +132,7 @@ export const agentFilterOptions: Array<{ label: string; value: AgentFilterValue 
 export type ProfileAgentOption = { label: string; value: ProfileConfig["agent"] };
 
 export const profileAgentOptions: ProfileAgentOption[] = [
+  { label: "Antigravity", value: "antigravity" },
   { label: "Claude Code", value: "claude-code" },
   { label: "Codex", value: "codex" },
   { label: "Grok CLI", value: "grok" },

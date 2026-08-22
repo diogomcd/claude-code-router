@@ -1533,6 +1533,7 @@ const localAgentProviderPluginSuffixes: Record<Exclude<LocalAgentProviderCandida
   codex: ["-codex-oauth", "-codex-oauth-internal"],
   grok: ["-grok-cli-oauth", "-grok-cli-oauth-internal"],
   kimi: ["-kimi-cli-oauth", "-kimi-cli-oauth-internal", "-kimi-cli-api-key", "-kimi-cli-api-key-internal"],
+  antigravity: ["-antigravity-oauth", "-antigravity-oauth-internal"],
   zcode: ["-zcode-api-key", "-zcode-api-key-internal"]
 };
 
@@ -2447,6 +2448,11 @@ export function AddProviderForm({
                       onChange={onChange}
                       probe={probe}
                     />
+                    <AntigravityProjectField
+                      customEndpoint={customEndpoint}
+                      draft={draft}
+                      onChange={onChange}
+                    />
                     <Field className="sm:col-span-2" label={t("Protocol details")}>
                       <div className="max-h-[128px] overflow-auto rounded-md border border-border bg-background p-2">
                         {manualProtocolDetection ? (
@@ -2844,6 +2850,75 @@ function ProviderCredentialRow({
         ) : null}
       </AnimatePresence>
     </div>
+  );
+}
+
+const antigravityProjectBaseUrl = "https://daily-cloudcode-pa.googleapis.com";
+const antigravityOauthPluginSuffix = "-antigravity-oauth";
+
+export function draftHasAntigravityOauthPlugin(plugins: unknown[]): boolean {
+  return plugins.some((plugin) => {
+    const key = isPlainRecord(plugin) && typeof plugin.key === "string" ? plugin.key : "";
+    return key.includes(antigravityOauthPluginSuffix);
+  });
+}
+
+export function antigravityOauthProjectPatch(
+  plugins: unknown[],
+  project: string
+): unknown[] {
+  if (!draftHasAntigravityOauthPlugin(plugins)) {
+    return [...plugins, { antigravityOauth: { project }, key: `ccr-local-agent-${antigravityOauthPluginSuffix}` }];
+  }
+  return plugins.map((plugin) => (
+    isPlainRecord(plugin) && typeof plugin.key === "string" && plugin.key.includes(antigravityOauthPluginSuffix)
+      ? { ...plugin, antigravityOauth: { ...(isPlainRecord(plugin.antigravityOauth) ? plugin.antigravityOauth : {}), project } }
+      : plugin
+  ));
+}
+
+export function readAntigravityOauthProject(plugins: unknown[]): string {
+  for (const plugin of plugins) {
+    if (isPlainRecord(plugin) && typeof plugin.key === "string" && plugin.key.includes(antigravityOauthPluginSuffix)) {
+      const oauth = isPlainRecord(plugin.antigravityOauth) ? plugin.antigravityOauth : {};
+      return typeof oauth.project === "string" ? oauth.project : "";
+    }
+  }
+  return "";
+}
+
+export function AntigravityProjectField({
+  customEndpoint,
+  draft,
+  onChange
+}: {
+  customEndpoint: boolean;
+  draft: AddProviderDraft;
+  onChange: (patch: Partial<AddProviderDraft>, resetProbe?: boolean) => void;
+}) {
+  const t = useAppText();
+  const presetMatchesAntigravity = getProviderPresets().some((preset) =>
+    preset.endpoints.some((endpoint) => endpoint.baseUrl === antigravityProjectBaseUrl)
+  );
+  const visible = customEndpoint
+    ? draft.baseUrl === antigravityProjectBaseUrl || draftHasAntigravityOauthPlugin(draft.providerPlugins)
+    : presetMatchesAntigravity || draftHasAntigravityOauthPlugin(draft.providerPlugins);
+  if (!visible) {
+    return null;
+  }
+  const project = readAntigravityOauthProject(draft.providerPlugins);
+  const updateProject = (value: string) => {
+    onChange({ providerPlugins: antigravityOauthProjectPatch(draft.providerPlugins, value) });
+  };
+  return (
+    <Field className="sm:col-span-2" label={t("Antigravity project")}>
+      <Input
+        aria-label={t("Antigravity project")}
+        onChange={(event) => updateProject(event.target.value)}
+        placeholder={t("Google Cloud project used by Antigravity requests")}
+        value={project}
+      />
+    </Field>
   );
 }
 

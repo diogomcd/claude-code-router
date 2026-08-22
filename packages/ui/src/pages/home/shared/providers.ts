@@ -4,6 +4,7 @@ import grokLogoUrl from "@/assets/agent-logos/grok.ico";
 import openCodeLogoUrl from "@/assets/agent-logos/opencode.ico";
 import zcodeLogoUrl from "@/assets/agent-logos/zcode.png";
 import moonshotProviderIconUrl from "@/assets/provider-icons/moonshot.ico";
+import antigravityProviderIconUrl from "@/assets/provider-icons/antigravity.svg";
 import {
   ROUTER_SCRIPT_API_VERSION,
   ROUTER_SCRIPT_MAX_TIMEOUT_MS
@@ -63,6 +64,7 @@ import { isGatewayProviderEnabled } from "@ccr/core/contracts/app";
 import type { AddProviderDraft, AddRoutingRuleDraft, ModelCatalogItem, ProviderCredentialDraft, ProviderProbeCandidate, ProviderProbeCandidateResult, ProviderUsageFieldTarget, RoutingRewriteDraftRow, RoutingRuleRow, ViewId } from "./types";
 
 export const localAgentProviderIconUrls: Record<LocalAgentProviderKind, string> = {
+  antigravity: antigravityProviderIconUrl,
   "claude-code": claudeCodeLogoUrl,
   codex: codexLogoUrl,
   grok: grokLogoUrl,
