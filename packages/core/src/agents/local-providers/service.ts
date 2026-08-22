@@ -5,6 +5,7 @@ import type {
   LocalAgentProviderProbeRequest,
   LocalAgentProviderProbeResult
 } from "@ccr/core/contracts/app";
+import { antigravityCandidate, importAntigravityProvider } from "@ccr/core/agents/local-providers/antigravity";
 import { claudeCodeCandidate, importClaudeCodeProvider } from "@ccr/core/agents/local-providers/claude-code";
 import { codexCandidate, importCodexProvider, probeCodexProvider } from "@ccr/core/agents/local-providers/codex";
 import { grokCandidate, importGrokProvider } from "@ccr/core/agents/local-providers/grok";
@@ -12,6 +13,7 @@ import { importKimiProvider, kimiCandidates } from "@ccr/core/agents/local-provi
 import { importOpenCodeProvider, opencodeCandidates } from "@ccr/core/agents/local-providers/opencode";
 import { importZcodeProvider, zcodeCandidate } from "@ccr/core/agents/local-providers/zcode";
 
+export { antigravityAccessTokenExpired, antigravityDefaultBaseUrl, antigravityIdentityHeaders, readAntigravityAuth, resolveAntigravityAuth } from "@ccr/core/agents/local-providers/antigravity";
 export { codexDefaultBaseUrl, readCodexAuth } from "@ccr/core/agents/local-providers/codex";
 export { readClaudeCodeOauth } from "@ccr/core/agents/local-providers/claude-code";
 export { grokDefaultBaseUrl, readGrokAuth, resolveGrokAuth } from "@ccr/core/agents/local-providers/grok";
@@ -25,6 +27,7 @@ export function getLocalAgentProviderCandidates(): LocalAgentProviderCandidate[]
     claudeCodeCandidate(),
     grokCandidate(),
     ...kimiCandidates(),
+    antigravityCandidate(),
     ...opencodeCandidates(),
     zcodeCandidate()
   ].filter((candidate) => candidate.status !== "missing");
@@ -53,6 +56,9 @@ export async function importLocalAgentProvider(request: LocalAgentProviderImport
   }
   if (candidate.kind === "opencode") {
     return importOpenCodeProvider(candidate, request.providerNames ?? []);
+  }
+  if (candidate.kind === "antigravity") {
+    return importAntigravityProvider(candidate, request.providerNames ?? []);
   }
   return importZcodeProvider(candidate, request.providerNames ?? []);
 }
