@@ -1,4 +1,5 @@
 import { anthropicProviderPreset } from "@ccr/core/providers/presets/anthropic/index";
+import { antigravityProviderPreset } from "@ccr/core/providers/presets/antigravity/index";
 import { bailianProviderPreset } from "@ccr/core/providers/presets/bailian/index";
 import { claudeApiProviderPreset } from "@ccr/core/providers/presets/claudeapi/index";
 import { code0ProviderPreset } from "@ccr/core/providers/presets/code0/index";
@@ -43,6 +44,7 @@ export const providerPresets: ProviderPreset[] = [
   openaiProviderPreset,
   anthropicProviderPreset,
   geminiProviderPreset,
+  antigravityProviderPreset,
   openRouterProviderPreset,
   nvidiaProviderPreset,
   deepSeekProviderPreset,

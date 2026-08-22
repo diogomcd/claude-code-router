@@ -253,6 +253,9 @@ function lockedProviderPresetProtocols(
       // would otherwise route Codex directly to a non-existent /responses path.
       return ["openai_chat_completions"];
     }
+    if (presetId === "antigravity") {
+      return ["gemini_generate_content"];
+    }
   }
 
   return [];
