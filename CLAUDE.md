@@ -41,6 +41,16 @@ npm run build:app:win     # local NSIS installer (must run on Windows x64: nativ
 npm run typecheck         # tsc --noEmit over every package
 ```
 
+`electron-builder` runs with `npmRebuild: true`, which recompiles `better-sqlite3` in place for the Electron ABI and leaves the root `node_modules` binding unloadable by plain Node. Every packaging script therefore ends with `npm run rebuild:sqlite3:node` (`npm rebuild better-sqlite3`) to restore the Node binding. If a build is interrupted or `electron-builder` is invoked directly, run that script manually afterwards. The symptom of a stale binding is the gateway failing to start with "No available models..." / "Service failed to start": `config.sqlite` cannot be opened, so `loadAppConfig` silently falls back to the default config with zero providers. Note that `rebuild:sqlite3` is the opposite direction (rebuilds for Electron via electron-rebuild); `rebuild:sqlite3:node` restores the binding for the system Node.
+
+### Local `ccr` is this repo
+
+On this machine the global `ccr` is a symlink into `packages/cli` (`npm i -g` of a local path), so `ccr ui` executes this working tree and resolves `better-sqlite3` from the repo's `node_modules`. Consequences:
+
+- Use `npm run build:assets` (or `npm run dev:cli`) to refresh what `ccr` runs. The full `npm run build` is only for producing the desktop AppImage/installer in `release/` and is not needed for daily `ccr ui` usage.
+- Any checkout, merge from upstream, or native rebuild here immediately changes the `ccr` in daily use; there is no isolation between development and the installed CLI. If stability is ever preferred, replace the link with a real `npm i -g @musistudio/claude-code-router`.
+- Never run `ccr stop` or `ccr ui` from an agent session. `ccr stop` kills the gateway the user relies on, and `ccr ui` starts a long-running server bound to the user's real config. If either command is needed, ask the user to run it.
+
 ### Test
 ```sh
 npm test                  # all workspace suites + architecture tests

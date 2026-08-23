@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Shell(sqlite3:*)",
-      "Shell(sqlite3 ~/.claude-code-router/config.sqlite \"SELECT sql FROM sqlite_master WHERE name='app_config';\" 2>&1; echo \"---\"; sqlite3 ~/.claude-code-router/config.sqlite \"SELECT * FROM app_config LIMIT 1;\" 2>&1 | head -c 5000)"
+      "Shell(sqlite3 ~/.claude-code-router/config.sqlite \"SELECT sql FROM sqlite_master WHERE name='app_config';\" 2>&1; echo \"---\"; sqlite3 ~/.claude-code-router/config.sqlite \"SELECT * FROM app_config LIMIT 1;\" 2>&1 | head -c 5000)",
+      "Shell(sqlite3 ~/.claude-code-router/config.sqlite \"SELECT value FROM app_config WHERE key='default';\" > /tmp/ccr-config.json && node -e \" const cfg = require('/tmp/ccr-config.json'); console.log('Providers:', cfg.Providers.map(p=>({name:p.name,enabled:p.enabled,models:(p.models||[]).length}))); console.log('vmp:', (cfg.virtualModelProfiles||[]).length); \")"
     ],
     "deny": [],
     "defaultMode": "default"

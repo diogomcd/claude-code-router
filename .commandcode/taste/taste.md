@@ -1,1 +1,2 @@
 - Comunica-se em português brasileiro e espera respostas/diagnósticos no mesmo idioma. Confidence: 0.95
+- Usa prompts muito curtos ("continue") após relatar um problema, esperando que o agente conduza a investigação de forma autônoma até a causa raiz, sem pedir aprovação a cada passo. Confidence: 0.6
