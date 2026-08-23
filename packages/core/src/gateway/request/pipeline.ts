@@ -34,6 +34,7 @@ import { codexMultiAgentBridgeResponseStream, prepareCodexMultiAgentBridgeReques
 import { rewriteAnthropicMessageStartModelStream, shouldRewriteAnthropicMessageStartModel } from "@ccr/core/gateway/features/anthropic-response-model";
 import { declaredToolNames, repairToolNamesResponseStream, shouldRepairToolNames } from "@ccr/core/gateway/features/tool-name-repair";
 import { prepareCursorOpenAICompatChatBody } from "@ccr/core/gateway/features/cursor-compat";
+import { prepareContextCompressionRequest } from "@ccr/core/gateway/features/context-compression";
 import { filteredResponseHeaders, formatError, formatUpstreamErrorForLog, forwardHeaders, inferGatewayClient, readRequestBody, sendJson, shouldCaptureGatewayUsage, shouldSendBody, stripLocalGatewayAuthHeaders } from "@ccr/core/gateway/http/io";
 import { serializeJsonBody, takeJsonObject } from "@ccr/core/gateway/http/body";
 import { createGatewayModelsResponse, prepareClaudeAppDiscoveredModelRequest, prepareClaudeCodeDiscoveredModelRequest, shouldServeGatewayModelsResponse } from "@ccr/core/gateway/features/model-discovery";
@@ -374,6 +375,32 @@ export class GatewayRequestPipeline {
       }
       if (!reserveApiKeyLimits(apiKey, request, response, bodyToForward)) {
         return;
+      }
+
+      const contextCompressionStartedAt = Date.now();
+      const contextCompressionRequest = await prepareContextCompressionRequest({
+        body: bodyToForward,
+        config: this.config,
+        method,
+        path,
+        routedModel
+      });
+      if (contextCompressionRequest) {
+        bodyToForward = contextCompressionRequest.body;
+        headers["x-ccr-context-compression"] = sanitizeHeaderValue(contextCompressionRequest.diagnostic);
+        headers["content-type"] = "application/json";
+        routeTrace?.capture({
+          changes: [
+            { operation: "replace", path: "/body", scope: "body" },
+            { after: headers["x-ccr-context-compression"], operation: "add", path: "/headers/x-ccr-context-compression", scope: "headers" },
+            { after: headers["content-type"], operation: "replace", path: "/headers/content-type", scope: "headers" }
+          ],
+          durationMs: Date.now() - contextCompressionStartedAt,
+          kind: "mutation",
+          name: "enrichment.context-compression",
+          phase: "enrichment",
+          startedAtMs: contextCompressionStartedAt
+        });
       }
 
       const codexBridgeStartedAt = Date.now();
