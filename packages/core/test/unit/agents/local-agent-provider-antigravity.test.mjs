@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,11 +10,10 @@ import {
   antigravityCredentialFile,
   antigravityDefaultBaseUrl,
   antigravityIdentityHeaders,
-  antigravityOAuthTokenUrl,
   fetchAntigravityModels,
   importAntigravityProvider,
   loadAntigravityProject,
-  persistAntigravityAuth,
+  normalizeAntigravityProviderAccountConfig,
   readAntigravityAuth,
   resolveAntigravityAuth
 } from "@ccr/core/agents/local-providers/antigravity.ts";
@@ -23,6 +22,7 @@ import {
   importLocalAgentProvider
 } from "@ccr/core/agents/local-providers/service.ts";
 import { localAgentProviderApiKey } from "@ccr/core/agents/local-providers/shared.ts";
+import { antigravityLanguageServerQuotaEndpoint } from "@ccr/core/providers/antigravity-account.ts";
 
 const futureExpiryMs = 4_102_444_800_000;
 const pastExpiryMs = 1_000_000_000_000;
@@ -31,8 +31,17 @@ async function withAntigravityHome(run) {
   const home = mkdtempSync(path.join(os.tmpdir(), "ccr-antigravity-"));
   const previousHome = process.env.CCR_INTERNAL_HOME_DIR;
   const previousFile = process.env.CCR_ANTIGRAVITY_OAUTH_FILE;
+  const previousPath = process.env.PATH;
+  // Remove secret-tool do PATH para os testes não lerem o keyring da máquina real.
+  const isolatedPath = (previousPath ?? "")
+    .split(path.delimiter)
+    .filter((entry) => entry && !existsSync(path.join(entry, "secret-tool")))
+    .join(path.delimiter);
   process.env.CCR_INTERNAL_HOME_DIR = home;
   delete process.env.CCR_ANTIGRAVITY_OAUTH_FILE;
+  if (isolatedPath) {
+    process.env.PATH = isolatedPath;
+  }
   mkdirSync(path.join(home, ".gemini"), { recursive: true });
   try {
     await run(home);
@@ -46,6 +55,9 @@ async function withAntigravityHome(run) {
       delete process.env.CCR_ANTIGRAVITY_OAUTH_FILE;
     } else {
       process.env.CCR_ANTIGRAVITY_OAUTH_FILE = previousFile;
+    }
+    if (previousPath !== undefined) {
+      process.env.PATH = previousPath;
     }
     rmSync(home, { force: true, recursive: true });
   }
@@ -83,7 +95,6 @@ test("Antigravity credentials read epoch milliseconds and normalize epoch second
 
     const auth = readAntigravityAuth();
     assert.equal(auth?.accessToken, "antigravity-access-token");
-    assert.equal(auth?.refreshToken, "antigravity-refresh-token");
     assert.equal(auth?.idToken, "antigravity-id-token");
     assert.equal(auth?.expiryDate, futureExpiryMs);
     assert.equal(auth?.sourceFile, file);
@@ -128,101 +139,33 @@ test("Antigravity resolve returns a live token without touching the network", as
   });
 });
 
-test("Antigravity resolve refreshes an expired token and rewrites the credential file", async () => {
+test("Antigravity resolve does not refresh or rewrite expired credentials", async () => {
   await withAntigravityHome(async (home) => {
     const file = writeCredentials(home, {
       access_token: "stale-access-token",
       expiry_date: pastExpiryMs,
       foo: "bar",
-      id_token: "antigravity-id-token",
-      refresh_token: "antigravity-refresh-token",
-      scope: "https://www.googleapis.com/auth/cloud-platform",
-      token_type: "Bearer"
-    });
-
-    await withStubbedFetch(
-      () => new Response(JSON.stringify({ access_token: "fresh-access-token", expires_in: 3600 }), {
-        headers: { "content-type": "application/json" },
-        status: 200
-      }),
-      async (calls) => {
-        const auth = await resolveAntigravityAuth();
-        assert.equal(auth?.accessToken, "fresh-access-token");
-        assert.equal(calls.length, 1);
-        assert.equal(calls[0].url, antigravityOAuthTokenUrl);
-        assert.equal(calls[0].init?.method, "POST");
-        assert.match(calls[0].init?.body ?? "", /grant_type=refresh_token/);
-        assert.match(calls[0].init?.body ?? "", /884354919052-36trc1jjb3tguiac32ov6cod268c5blh/);
-        assert.match(calls[0].init?.body ?? "", /REDACTED/);
-
-        const persisted = JSON.parse(readFileSync(file, "utf8"));
-        assert.equal(persisted.access_token, "fresh-access-token");
-        assert.equal(persisted.id_token, "antigravity-id-token");
-        assert.equal(persisted.scope, "https://www.googleapis.com/auth/cloud-platform");
-        assert.equal(persisted.token_type, "Bearer");
-        assert.equal(persisted.foo, "bar");
-        assert.ok(persisted.expiry_date > Date.now());
-        assert.equal(statSync(file).mode & 0o777, 0o600);
-      }
-    );
-  });
-});
-
-test("Antigravity concurrent resolves share a single refresh request", async () => {
-  await withAntigravityHome(async (home) => {
-    writeCredentials(home, {
-      access_token: "stale-access-token",
-      expiry_date: pastExpiryMs,
       refresh_token: "antigravity-refresh-token"
     });
 
     await withStubbedFetch(
-      async () => {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        return new Response(JSON.stringify({ access_token: "fresh-access-token", expires_in: 3600 }), {
-          headers: { "content-type": "application/json" },
-          status: 200
-        });
-      },
-      async (calls) => {
-        const [first, second] = await Promise.all([resolveAntigravityAuth(), resolveAntigravityAuth()]);
-        assert.equal(first?.accessToken, "fresh-access-token");
-        assert.equal(second?.accessToken, "fresh-access-token");
-        assert.equal(calls.length, 1);
-      }
-    );
-  });
-});
-
-test("Antigravity adopts a peer-rotated credential when the refresh is rejected", async () => {
-  await withAntigravityHome(async (home) => {
-    writeCredentials(home, {
-      access_token: "stale-access-token",
-      expiry_date: pastExpiryMs,
-      refresh_token: "stale-refresh-token"
-    });
-
-    await withStubbedFetch(
       () => {
-        writeCredentials(home, {
-          access_token: "peer-rotated-access-token",
-          expiry_date: futureExpiryMs,
-          refresh_token: "peer-rotated-refresh-token"
-        });
-        return new Response(JSON.stringify({ error: "invalid_grant" }), {
-          headers: { "content-type": "application/json" },
-          status: 400
-        });
+        throw new Error("Antigravity must not refresh credentials");
       },
       async (calls) => {
-        const auth = await resolveAntigravityAuth();
-        assert.equal(auth?.accessToken, "peer-rotated-access-token");
-        assert.equal(auth?.refreshToken, "peer-rotated-refresh-token");
-        assert.equal(calls.length, 1);
+        assert.equal(await resolveAntigravityAuth(), undefined);
+        assert.equal(calls.length, 0);
+        assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), {
+          access_token: "stale-access-token",
+          expiry_date: pastExpiryMs,
+          foo: "bar",
+          refresh_token: "antigravity-refresh-token"
+        });
       }
     );
   });
 });
+
 
 test("Antigravity resolve reports missing and locked credentials without throwing", async () => {
   await withAntigravityHome(async (home) => {
@@ -233,39 +176,10 @@ test("Antigravity resolve reports missing and locked credentials without throwin
     assert.equal(await resolveAntigravityAuth(), undefined);
 
     writeCredentials(home, { access_token: "locked-access-token", expiry_date: pastExpiryMs });
-    const locked = await resolveAntigravityAuth();
-    assert.equal(locked?.accessToken, "locked-access-token");
-    assert.equal(antigravityAccessTokenExpired(locked), true);
+    assert.equal(await resolveAntigravityAuth(), undefined);
   });
 });
 
-test("Antigravity persistence preserves unknown fields from the credential file", async () => {
-  await withAntigravityHome(async (home) => {
-    const file = writeCredentials(home, {
-      access_token: "old-access-token",
-      expiry_date: pastExpiryMs,
-      foo: "bar",
-      id_token: "antigravity-id-token",
-      refresh_token: "antigravity-refresh-token",
-      token_type: "Bearer"
-    });
-
-    persistAntigravityAuth({
-      accessToken: "new-access-token",
-      expiryDate: futureExpiryMs,
-      refreshToken: "antigravity-refresh-token",
-      sourceFile: file
-    });
-
-    const persisted = JSON.parse(readFileSync(file, "utf8"));
-    assert.equal(persisted.access_token, "new-access-token");
-    assert.equal(persisted.expiry_date, futureExpiryMs);
-    assert.equal(persisted.foo, "bar");
-    assert.equal(persisted.id_token, "antigravity-id-token");
-    assert.equal(persisted.token_type, "Bearer");
-    assert.equal(statSync(file).mode & 0o777, 0o600);
-  });
-});
 
 test("Antigravity identity headers accept environment overrides", () => {
   const previousUserAgent = process.env.ANTIGRAVITY_IDE_USER_AGENT;
@@ -274,7 +188,7 @@ test("Antigravity identity headers accept environment overrides", () => {
     delete process.env.ANTIGRAVITY_IDE_USER_AGENT;
     delete process.env.ANTIGRAVITY_API_CLIENT_HEADER;
     const headers = antigravityIdentityHeaders();
-    assert.match(headers["user-agent"], /^antigravity-ide\//);
+    assert.match(headers["user-agent"], /^antigravity\/hub\//);
     assert.match(headers["x-goog-api-client"], /^gl-node\//);
 
     process.env.ANTIGRAVITY_IDE_USER_AGENT = "custom-agent/9";
@@ -327,13 +241,12 @@ test("Antigravity model catalog parses the internal payload and tolerates failur
     () => new Response(JSON.stringify({
       models: {
         "gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro Low" },
-        "claude-sonnet-4-6": {}
+        "chat_20706": {}
       }
     }), { headers: { "content-type": "application/json" }, status: 200 }),
     async (calls) => {
       const models = await fetchAntigravityModels("catalog-token");
-      assert.deepEqual(models.sort((a,b) => a.id.localeCompare(b.id)), [
-        { id: "claude-sonnet-4-6" },
+      assert.deepEqual(models, [
         { displayName: "Gemini 3.1 Pro Low", id: "gemini-3.1-pro-low" }
       ]);
       assert.equal(calls[0].url, `${antigravityDefaultBaseUrl}/v1internal:fetchAvailableModels`);
@@ -361,13 +274,63 @@ test("Antigravity candidate reports available, locked and missing login states",
     assert.equal(available.protocol, "gemini_generate_content");
 
     writeCredentials(home, { access_token: "stale-token", expiry_date: pastExpiryMs, refresh_token: "rt" });
-    assert.equal(antigravityCandidate().status, "available");
+    const lockedWithRefreshToken = antigravityCandidate();
+    assert.equal(lockedWithRefreshToken.status, "locked");
+    assert.equal(lockedWithRefreshToken.importable, false);
 
     writeCredentials(home, { access_token: "stale-token", expiry_date: pastExpiryMs });
     const locked = antigravityCandidate();
     assert.equal(locked.status, "locked");
     assert.equal(locked.importable, false);
   });
+});
+
+test("Antigravity provider account normalization preserves explicit and custom settings", () => {
+  const provider = {
+    account: { refreshIntervalMs: 123_456 },
+    apiKey: localAgentProviderApiKey,
+    baseUrl: `${antigravityDefaultBaseUrl}/`,
+    id: "antigravity",
+    models: [],
+    name: "Imported Google Antigravity",
+    type: "gemini_generate_content"
+  };
+  const normalized = normalizeAntigravityProviderAccountConfig(provider);
+  assert.equal(normalized.account?.enabled, true);
+  assert.equal(normalized.account?.refreshIntervalMs, 123_456);
+  assert.equal(normalized.account?.connectors?.[0]?.parser, "antigravity-quota");
+  assert.equal(normalized.account?.connectors?.[0]?.endpoint, antigravityLanguageServerQuotaEndpoint);
+  assert.equal(normalized.account?.connectors?.[0]?.auth, "none");
+
+  const legacy = normalizeAntigravityProviderAccountConfig({
+    ...provider,
+    account: {
+      connectors: [{
+        auth: "provider-api-key",
+        endpoint: `${antigravityDefaultBaseUrl}/v1internal:retrieveUserQuotaSummary`,
+        mapping: { meters: [] },
+        parser: "antigravity-quota",
+        type: "http-json"
+      }],
+      enabled: true
+    }
+  });
+  assert.equal(legacy.account?.connectors?.[0]?.endpoint, antigravityLanguageServerQuotaEndpoint);
+
+  const disabled = normalizeAntigravityProviderAccountConfig({
+    ...provider,
+    account: { enabled: false }
+  });
+  assert.deepEqual(disabled.account, { enabled: false });
+
+  const custom = normalizeAntigravityProviderAccountConfig({
+    ...provider,
+    account: {
+      connectors: [{ endpoint: "https://quota.example.test", mapping: { meters: [] }, type: "http-json" }],
+      enabled: true
+    }
+  });
+  assert.equal(custom.account?.connectors?.[0]?.endpoint, "https://quota.example.test");
 });
 
 test("Antigravity import builds the gateway provider payload and both auth plugins", async () => {
@@ -393,6 +356,8 @@ test("Antigravity import builds the gateway provider payload and both auth plugi
         assert.equal(result.provider.baseUrl, antigravityDefaultBaseUrl);
         assert.equal(result.provider.protocol, "gemini_generate_content");
         assert.equal(result.provider.apiKey, localAgentProviderApiKey);
+        assert.equal(result.provider.account?.enabled, true);
+        assert.equal(result.provider.account?.connectors?.[0]?.parser, "antigravity-quota");
         assert.ok(result.provider.models.includes("gemini-3.1-pro-low"));
         assert.ok(result.provider.models.includes("claude-sonnet-4-6"));
         assert.equal(result.providerPlugins.length, 2);

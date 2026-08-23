@@ -13,7 +13,7 @@ import { importKimiProvider, kimiCandidates } from "@ccr/core/agents/local-provi
 import { importOpenCodeProvider, opencodeCandidates } from "@ccr/core/agents/local-providers/opencode";
 import { importZcodeProvider, zcodeCandidate } from "@ccr/core/agents/local-providers/zcode";
 
-export { antigravityAccessTokenExpired, antigravityDefaultBaseUrl, antigravityIdentityHeaders, readAntigravityAuth, resolveAntigravityAuth } from "@ccr/core/agents/local-providers/antigravity";
+export { antigravityAccessTokenExpired, antigravityDefaultBaseUrl, antigravityIdentityHeaders, antigravityProviderAccountConfig, fetchAntigravityModels, loadAntigravityProject, normalizeAntigravityProviderAccountConfig, readAntigravityAuth, resolveAntigravityAuth } from "@ccr/core/agents/local-providers/antigravity";
 export { codexDefaultBaseUrl, readCodexAuth } from "@ccr/core/agents/local-providers/codex";
 export { readClaudeCodeOauth } from "@ccr/core/agents/local-providers/claude-code";
 export { grokDefaultBaseUrl, readGrokAuth, resolveGrokAuth } from "@ccr/core/agents/local-providers/grok";

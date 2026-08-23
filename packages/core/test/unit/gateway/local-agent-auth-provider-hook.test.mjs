@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -186,7 +186,37 @@ test("Antigravity local agent auth hook injects the live Bearer token and drops 
   });
 });
 
-test("Antigravity local agent request hook wraps the public Gemini call into v1internal", () => {
+test("Antigravity local agent auth hook rejects an expired token instead of using the imported token", async (t) => {
+  await withAntigravityHome(t, async (antigravityHome) => {
+    writeAntigravityAuth(antigravityHome, {
+      access_token: "expired-antigravity-access-token",
+      expiry_date: Date.now() - 1,
+      refresh_token: "antigravity-refresh-token"
+    });
+
+    const [hook] = createGatewayPlugin({
+      config: {
+        providerPlugins: [antigravityOauthProviderPlugin()]
+      }
+    }).providerHooks;
+    const authResult = await hook.authenticate({
+      upstreamRequest: {
+        body: { contents: [] },
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": "client-key"
+        },
+        method: "POST",
+        url: "https://daily-cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent"
+      }
+    });
+
+    assert.equal(authResult.ok, false);
+    assert.equal(authResult.error, "Antigravity access token was not found.");
+  });
+});
+
+test("Antigravity local agent request hook wraps the public Gemini call into v1internal", async () => {
   const plugin = antigravityOauthProviderPlugin();
   const [hook] = createGatewayPlugin({
     config: {
@@ -194,7 +224,7 @@ test("Antigravity local agent request hook wraps the public Gemini call into v1i
     }
   }).providerHooks;
 
-  const requestResult = hook.transformRequest({
+  const requestResult = await hook.transformRequest({
     upstreamRequest: {
       body: { contents: [] },
       headers: {
@@ -212,7 +242,7 @@ test("Antigravity local agent request hook wraps the public Gemini call into v1i
   assert.equal(requestResult.value.body.project, "proj-123");
   assert.equal(requestResult.value.body.model, "gemini-3-pro-preview");
   assert.deepEqual(requestResult.value.body.request, { contents: [] });
-  assert.match(requestResult.value.headers["user-agent"], /^antigravity-ide\//);
+  assert.match(requestResult.value.headers["user-agent"], /^antigravity\/hub\//);
 });
 
 test("Antigravity local agent response hook unwraps only the internal response envelope", async () => {
@@ -385,14 +415,21 @@ function antigravityOauthProviderPlugin() {
 async function withAntigravityHome(t, run) {
   const previousInternalHome = process.env.CCR_INTERNAL_HOME_DIR;
   const previousOauthFile = process.env.CCR_ANTIGRAVITY_OAUTH_FILE;
+  const previousPath = process.env.PATH;
   const antigravityHome = mkdtempSync(path.join(os.tmpdir(), "ccr-antigravity-hook-test-"));
+  const isolatedPath = (previousPath ?? "")
+    .split(path.delimiter)
+    .filter((entry) => entry && !existsSync(path.join(entry, "secret-tool")))
+    .join(path.delimiter);
   process.env.CCR_INTERNAL_HOME_DIR = antigravityHome;
   delete process.env.CCR_ANTIGRAVITY_OAUTH_FILE;
+  process.env.PATH = isolatedPath;
   try {
     await run(antigravityHome);
   } finally {
     restoreEnv("CCR_INTERNAL_HOME_DIR", previousInternalHome);
     restoreEnv("CCR_ANTIGRAVITY_OAUTH_FILE", previousOauthFile);
+    restoreEnv("PATH", previousPath);
     rmSync(antigravityHome, { force: true, recursive: true });
   }
 }

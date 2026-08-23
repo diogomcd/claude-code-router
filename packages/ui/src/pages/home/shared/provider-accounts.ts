@@ -165,7 +165,7 @@ export function formatProviderAccountMeterValue(
     return `€${formatProviderAccountNumber(value)}`;
   }
   if (unit === "%") {
-    return `${formatProviderAccountNumber(value)}%`;
+    return `${Math.floor(Math.max(0, value))}%`;
   }
   if (unit === "hours") {
     return `${formatProviderAccountNumber(value)}h`;

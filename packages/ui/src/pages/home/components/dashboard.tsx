@@ -4023,7 +4023,20 @@ function isProviderAccountQuotaMeter(meter: ProviderAccountMeter): boolean {
 }
 
 function compareProviderAccountQuotaMeters(a: ProviderAccountMeter, b: ProviderAccountMeter): number {
-  return providerAccountMeterWindowRank(a) - providerAccountMeterWindowRank(b) || a.label.localeCompare(b.label);
+  return providerAccountMeterWindowRank(a) - providerAccountMeterWindowRank(b) ||
+    providerAccountQuotaPriority(a) - providerAccountQuotaPriority(b) ||
+    a.label.localeCompare(b.label);
+}
+
+function providerAccountQuotaPriority(meter: ProviderAccountMeter): number {
+  const id = meter.id.trim().toLowerCase();
+  if (id === "antigravity_gemini_weekly") {
+    return 0;
+  }
+  if (id === "antigravity_3p_weekly") {
+    return 1;
+  }
+  return 2;
 }
 
 function providerAccountMeterWindowRank(meter: ProviderAccountMeter): number {

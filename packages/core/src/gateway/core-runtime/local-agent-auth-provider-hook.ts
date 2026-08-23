@@ -1,4 +1,4 @@
-import { antigravityAccessTokenExpired, antigravityIdentityHeaders, readAntigravityAuth, readClaudeCodeOauth, readGrokAuth, readKimiAuth, resolveAntigravityAuth, resolveGrokAuth, resolveKimiAuth } from "@ccr/core/agents/local-providers/service";
+import { antigravityIdentityHeaders, loadAntigravityProject, readClaudeCodeOauth, readGrokAuth, readKimiAuth, resolveAntigravityAuth, resolveGrokAuth, resolveKimiAuth } from "@ccr/core/agents/local-providers/service";
 import { grokAccessTokenExpired, grokClientVersion } from "@ccr/core/agents/local-providers/grok";
 import { kimiAccessTokenExpired, kimiIdentityHeaders } from "@ccr/core/agents/local-providers/kimi";
 import { transformCodexApplyPatchBridgeRequestBody } from "@ccr/core/gateway/features/codex-patch-bridge";
@@ -96,7 +96,12 @@ function localAgentOauthProviderHook(plugin: unknown): ProviderHook | undefined 
   };
 
   if (kind === "antigravity") {
-    hook.authenticate = (input) => authenticateWithBearer(input, () => resolveLiveAntigravityAccessToken(plugin), plugin, "Antigravity access token was not found.");
+    hook.authenticate = (input) => authenticateWithCurrentBearer(
+      input,
+      resolveLiveAntigravityAccessToken,
+      plugin,
+      "Antigravity access token was not found."
+    );
     hook.transformRequest = (input) => transformAntigravityRequest(input, plugin);
     hook.transformResponse = transformAntigravityResponse;
     return hook;
@@ -157,6 +162,25 @@ async function authenticateWithBearer(
   };
 }
 
+async function authenticateWithCurrentBearer(
+  input: ProviderPluginInput,
+  tokenResolver: () => Promise<string | undefined> | string | undefined,
+  plugin: Record<string, unknown>,
+  missingTokenError: string
+): Promise<ProviderHookResult> {
+  const token = await tokenResolver();
+  if (!token) {
+    return { error: missingTokenError, ok: false };
+  }
+  return {
+    ok: true,
+    value: {
+      ...input.upstreamRequest,
+      headers: withBearerAuth(input.upstreamRequest.headers, token, originalRemoveHeaders(plugin))
+    }
+  };
+}
+
 async function authenticateClaudeCode(
   input: ProviderPluginInput,
   plugin: Record<string, unknown>
@@ -188,12 +212,9 @@ async function resolveLiveGrokAccessToken(plugin: Record<string, unknown>): Prom
   return originalBearerToken(plugin);
 }
 
-async function resolveLiveAntigravityAccessToken(plugin: Record<string, unknown>): Promise<string | undefined> {
-  const auth = await resolveAntigravityAuth().catch(() => readAntigravityAuth());
-  if (auth?.accessToken && !antigravityAccessTokenExpired(auth)) {
-    return auth.accessToken;
-  }
-  return originalBearerToken(plugin);
+async function resolveLiveAntigravityAccessToken(): Promise<string | undefined> {
+  const auth = await resolveAntigravityAuth().catch(() => undefined);
+  return auth?.accessToken;
 }
 
 async function resolveLiveKimiAccessToken(plugin: Record<string, unknown>): Promise<string | undefined> {
@@ -218,11 +239,14 @@ function transformWithHeaders(input: ProviderPluginInput, headers: HeaderRecord)
   };
 }
 
-function transformAntigravityRequest(input: ProviderPluginInput, plugin: Record<string, unknown>): ProviderHookResult {
+async function transformAntigravityRequest(input: ProviderPluginInput, plugin: Record<string, unknown>): Promise<ProviderHookResult> {
   const url = new URL(input.upstreamRequest.url);
   const [pathModel, action = "generateContent"] = decodeURIComponent(url.pathname.split("/models/")[1] ?? "").split(":");
   const model = input.model || pathModel;
-  const project = antigravityOauthProject(plugin);
+  const project = await resolveAntigravityProject(plugin);
+  if (!project) {
+    return { error: "Antigravity cloudaicompanionProject was not resolved from loadCodeAssist.", ok: false };
+  }
   const body = isRecord(input.upstreamRequest.body) ? input.upstreamRequest.body : {};
   return {
     ok: true,
@@ -241,6 +265,16 @@ function transformAntigravityRequest(input: ProviderPluginInput, plugin: Record<
       url: `${url.origin}/v1internal:${action}`
     }
   };
+}
+
+async function resolveAntigravityProject(plugin: Record<string, unknown>): Promise<string | undefined> {
+  const configured = antigravityOauthProject(plugin);
+  if (configured) {
+    return configured;
+  }
+  const auth = await resolveAntigravityAuth().catch(() => undefined);
+  const token = auth?.accessToken;
+  return token ? loadAntigravityProject(token) : undefined;
 }
 
 function transformAntigravityResponse(input: ProviderPayloadHookInput): ProviderPayloadHookResult {

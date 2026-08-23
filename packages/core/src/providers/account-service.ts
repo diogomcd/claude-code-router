@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { loadAppConfig } from "@ccr/core/config/config";
 import { attachCodexRateLimitResetCreditDetails } from "@ccr/core/agents/local-providers/codex";
 import {
+  antigravityIdentityHeaders,
   codexDefaultBaseUrl,
   localAgentProviderApiKey,
   kimiAccessTokenExpired,
@@ -10,6 +11,7 @@ import {
   readCodexAuth,
   readGrokAuth,
   readKimiAuth,
+  resolveAntigravityAuth,
   resolveGrokAuth,
   resolveKimiAuth,
   readZcodeLocalProviderCredential,
@@ -17,6 +19,10 @@ import {
 } from "@ccr/core/agents/local-providers/service";
 import { grokAccessTokenExpired } from "@ccr/core/agents/local-providers/grok";
 import { pluginService } from "@ccr/core/plugins/service";
+import {
+  antigravityLanguageServerQuotaEndpoint,
+  fetchAntigravityQuotaSummary
+} from "@ccr/core/providers/antigravity-account";
 import { getUsageTotalsSince } from "@ccr/core/usage/store";
 import { findProviderPresetByBaseUrl, providerEndpointCanReceiveProviderApiKey } from "@ccr/core/providers/presets/index";
 import { fetchWithSystemProxy } from "@ccr/core/proxy/system-proxy-fetch";
@@ -199,7 +205,9 @@ export async function testProviderAccountConnector(request: ProviderAccountTestR
   const connector = normalizeProviderAccountTestConnector(request.connector);
   const payload = connector.type === "webcontent-json"
     ? await fetchWebContentJson(provider, connector)
-    : await fetchJson(connector.endpoint, provider, connector.auth, connector.headers, connector.method, connector.body);
+    : isAntigravityLanguageServerConnector(connector)
+      ? await fetchAntigravityQuotaSummary()
+      : await fetchJson(connector.endpoint, provider, connector.auth, connector.headers, connector.method, connector.body);
   const source = connector.type;
   if (connector.parser === "grok-subscription") {
     const meters = grokSubscriptionMeters(payload, source);
@@ -236,6 +244,16 @@ export async function testProviderAccountConnector(request: ProviderAccountTestR
     return {
       meters,
       message: meters.length === 0 ? readMappedString(connector.mapping.message, payload) ?? "No user balance data available." : readMappedString(connector.mapping.message, payload),
+      paths: flattenJsonPaths(payload),
+      payload,
+      status: statusFromMeters(meters, [], 1)
+    };
+  }
+  if (connector.parser === "antigravity-quota") {
+    const meters = antigravityQuotaMeters(payload, source);
+    return {
+      meters,
+      message: meters.length === 0 ? "No quota information available." : readMappedString(connector.mapping.message, payload),
       paths: flattenJsonPaths(payload),
       payload,
       status: statusFromMeters(meters, [], 1)
@@ -281,6 +299,10 @@ export function newApiKeyUsageFallbackMessageForTest(payload: unknown): string {
 
 export function newApiUserSelfMetersForTest(payload: unknown): ProviderAccountMeter[] {
   return newApiUserSelfMeters(payload);
+}
+
+export function antigravityQuotaMetersForTest(payload: unknown): ProviderAccountMeter[] {
+  return antigravityQuotaMeters(payload);
 }
 
 export async function localCodexAccountCredentialForTest(plugin: Record<string, unknown>): Promise<LocalAgentAccountCredential> {
@@ -707,18 +729,29 @@ async function resolveStandardConnector(
   return connectorError("standard", lastError || "No standard account endpoint returned a usable snapshot.", connectorId(connector));
 }
 
+function isAntigravityLanguageServerConnector(
+  connector: ProviderAccountHttpJsonConnectorConfig | ProviderAccountWebContentJsonConnectorConfig
+): boolean {
+  return connector.type === "http-json" &&
+    connector.parser === "antigravity-quota" &&
+    connector.endpoint.trim() === antigravityLanguageServerQuotaEndpoint;
+}
+
 async function resolveHttpJsonConnector(
   config: AppConfig,
   provider: GatewayProviderConfig,
   connector: ProviderAccountHttpJsonConnectorConfig
 ): Promise<ConnectorResult> {
-  const request = providerAccountConnectorUsesProviderApiKey(connector)
+  const usesAntigravityLanguageServer = isAntigravityLanguageServerConnector(connector);
+  const request = providerAccountConnectorUsesProviderApiKey(connector) && !usesAntigravityLanguageServer
     ? await materializeProviderAccountRequest(config, provider)
     : { provider };
-  const payload = await fetchJson(connector.endpoint, request.provider, connector.auth, {
-    ...(connector.headers ?? {}),
-    ...(request.headers ?? {})
-  }, connector.method, connector.body);
+  const payload = usesAntigravityLanguageServer
+    ? await fetchAntigravityQuotaSummary()
+    : await fetchJson(connector.endpoint, request.provider, connector.auth, {
+        ...(connector.headers ?? {}),
+        ...(request.headers ?? {})
+      }, connector.method, connector.body);
   if (connector.parser === "grok-subscription") {
     return {
       errors: [],
@@ -751,6 +784,15 @@ async function resolveHttpJsonConnector(
     return {
       errors: [],
       message: meters.length === 0 ? readMappedString(connector.mapping.message, payload) ?? "No user balance data available." : readMappedString(connector.mapping.message, payload),
+      meters,
+      source: "http-json"
+    };
+  }
+  if (connector.parser === "antigravity-quota") {
+    const meters = antigravityQuotaMeters(payload, "http-json");
+    return {
+      errors: [],
+      message: meters.length === 0 ? "No quota information available." : readMappedString(connector.mapping.message, payload),
       meters,
       source: "http-json"
     };
@@ -804,6 +846,15 @@ async function resolveWebContentJsonConnector(
     return {
       errors: [],
       message: meters.length === 0 ? readMappedString(connector.mapping.message, payload) ?? "No user balance data available." : readMappedString(connector.mapping.message, payload),
+      meters,
+      source
+    };
+  }
+  if (connector.parser === "antigravity-quota") {
+    const meters = antigravityQuotaMeters(payload, source);
+    return {
+      errors: [],
+      message: meters.length === 0 ? "No quota information available." : readMappedString(connector.mapping.message, payload),
       meters,
       source
     };
@@ -1303,6 +1354,145 @@ function uniqueKimiCodeUsageMeterId(id: string, seenIds: Set<string>): string {
   return `${id}-${index}`;
 }
 
+const antigravityQuotaBucketDefinitions = [
+  {
+    bucketId: "gemini-weekly",
+    id: "antigravity_gemini_weekly",
+    label: "Gemini Models"
+  },
+  {
+    bucketId: "3p-weekly",
+    id: "antigravity_3p_weekly",
+    label: "Claude GPT models"
+  }
+] as const;
+
+function antigravityQuotaMeters(
+  payload: unknown,
+  source: ProviderAccountConnectorSource = "http-json"
+): ProviderAccountMeter[] {
+  const meters: ProviderAccountMeter[] = [];
+  const seen = new Set<string>();
+  for (const group of antigravityQuotaGroups(payload)) {
+    if (!isRecord(group)) {
+      continue;
+    }
+    const groupName = antigravityQuotaDisplayName(group);
+    const rawBuckets = readJsonRecordValue(group, "buckets");
+    const buckets = Array.isArray(rawBuckets) && rawBuckets.length > 0 ? rawBuckets.filter(isRecord) : [group];
+    for (const bucket of buckets) {
+      const definition = antigravityQuotaBucketDefinition(
+        antigravityQuotaBucketId(bucket),
+        groupName || antigravityQuotaDisplayName(bucket)
+      );
+      if (!definition || seen.has(definition.id)) {
+        continue;
+      }
+      const remainingFraction = antigravityQuotaRemainingFraction(bucket) ??
+        (bucket === group ? undefined : antigravityQuotaRemainingFraction(group));
+      if (remainingFraction === undefined) {
+        continue;
+      }
+      const remaining = Math.min(1, Math.max(0, remainingFraction)) * 100;
+      const meter = normalizeMeter({
+        id: definition.id,
+        kind: "quota",
+        label: definition.label,
+        limit: 100,
+        remaining,
+        resetAt: antigravityQuotaResetAt(bucket) ?? (bucket === group ? undefined : antigravityQuotaResetAt(group)),
+        unit: "%",
+        used: 100 - remaining,
+        window: "weekly"
+      }, source);
+      if (meter) {
+        meters.push(meter);
+        seen.add(definition.id);
+      }
+    }
+  }
+  return meters;
+}
+
+function antigravityQuotaGroups(payload: unknown): unknown[] {
+  if (!isRecord(payload)) {
+    return [];
+  }
+  const directGroups = readJsonRecordValue(payload, "groups");
+  if (Array.isArray(directGroups) && directGroups.length > 0) {
+    return directGroups;
+  }
+  const response = readJsonRecordValue(payload, "response");
+  const nestedGroups = isRecord(response) ? readJsonRecordValue(response, "groups") : undefined;
+  return Array.isArray(nestedGroups) ? nestedGroups : Array.isArray(directGroups) ? directGroups : [];
+}
+
+function antigravityQuotaBucketDefinition(
+  bucketId: string | undefined,
+  groupName: string | undefined
+): (typeof antigravityQuotaBucketDefinitions)[number] | undefined {
+  const normalizedBucketId = bucketId?.trim().toLowerCase();
+  const byBucketId = antigravityQuotaBucketDefinitions.find((definition) => definition.bucketId === normalizedBucketId);
+  if (byBucketId) {
+    return byBucketId;
+  }
+  const normalizedGroupName = antigravityQuotaName(groupName);
+  return antigravityQuotaBucketDefinitions.find((definition) =>
+    antigravityQuotaName(definition.label) === normalizedGroupName ||
+    (definition.bucketId === "3p-weekly" && normalizedGroupName === "claude and gpt models")
+  );
+}
+
+function antigravityQuotaBucketId(bucket: Record<string, unknown>): string | undefined {
+  return readString(readJsonRecordValue(bucket, "bucketId")) || readString(readJsonRecordValue(bucket, "id"));
+}
+
+function antigravityQuotaDisplayName(value: Record<string, unknown>): string | undefined {
+  return readString(readJsonRecordValue(value, "displayName")) ||
+    readString(readJsonRecordValue(value, "name")) ||
+    readString(readJsonRecordValue(value, "label"));
+}
+
+function antigravityQuotaName(value: string | undefined): string {
+  return value?.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim() ?? "";
+}
+
+function antigravityQuotaRemainingFraction(bucket: Record<string, unknown>): number | undefined {
+  const remaining = readJsonRecordValue(bucket, "remaining");
+  if (isRecord(remaining)) {
+    const remainingCase = antigravityQuotaName(readString(readJsonRecordValue(remaining, "case"))).replace(/ /g, "");
+    if (remainingCase === "remainingfraction") {
+      return normalizeNumber(readJsonRecordValue(remaining, "value"));
+    }
+    return undefined;
+  }
+  return normalizeNumber(
+    readJsonRecordValue(bucket, "remainingFraction") ?? readJsonRecordValue(bucket, "remaining_fraction")
+  );
+}
+
+function antigravityQuotaResetAt(record: Record<string, unknown>): string | undefined {
+  for (const key of ["resetTime", "reset_time"]) {
+    const value = readJsonRecordValue(record, key);
+    const numeric = normalizeNumber(value);
+    if (numeric !== undefined) {
+      const milliseconds = numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+      const date = new Date(milliseconds);
+      if (!Number.isNaN(date.getTime())) {
+        return date.toISOString();
+      }
+    }
+    const text = readString(value);
+    if (text) {
+      const date = new Date(text);
+      if (!Number.isNaN(date.getTime())) {
+        return date.toISOString();
+      }
+    }
+  }
+  return undefined;
+}
+
 function kimiCodeUsageResetAt(data: Record<string, unknown>): string | undefined {
   for (const key of ["reset_at", "resetAt", "reset_time", "resetTime"]) {
     const value = data[key];
@@ -1492,6 +1682,9 @@ async function localAgentProviderAccountCredential(
     }
 
     const key = readString((plugin as { key?: unknown }).key)?.toLowerCase() ?? "";
+    if (key.includes("antigravity-oauth")) {
+      return await localAntigravityAccountCredential(plugin);
+    }
     if (key.includes("codex-oauth")) {
       return await localCodexAccountCredential(plugin);
     }
@@ -1847,6 +2040,18 @@ async function localGrokAccountCredential(plugin: Record<string, unknown>): Prom
   return {
     apiKey,
     headers: withoutHeader(headers, "authorization")
+  };
+}
+
+async function localAntigravityAccountCredential(plugin: Record<string, unknown>): Promise<{ apiKey?: string; headers?: Record<string, string> }> {
+  const headers = localProviderPluginAuthHeaders(plugin);
+  const auth = await resolveAntigravityAuth().catch(() => undefined);
+  return {
+    apiKey: auth?.accessToken || readBearerToken(headers.authorization || headers.Authorization),
+    headers: {
+      ...withoutHeader(headers, "authorization"),
+      ...antigravityIdentityHeaders()
+    }
   };
 }
 

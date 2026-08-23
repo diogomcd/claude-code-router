@@ -13,6 +13,7 @@ import type {
   GatewayProviderProtocol
 } from "@ccr/core/contracts/app";
 import { codexDefaultBaseUrl, readCodexAuth } from "@ccr/core/agents/local-providers/codex";
+import { antigravityDefaultBaseUrl, antigravityIdentityHeaders, loadAntigravityProject, resolveAntigravityAuth } from "@ccr/core/agents/local-providers/service";
 import { localAgentProviderApiKey } from "@ccr/core/agents/local-providers/shared";
 import { findProviderPresetByBaseUrl, providerApiKeySafetyIssue } from "@ccr/core/providers/presets/index";
 import { getProviderCatalogModels } from "@ccr/core/providers/model-catalog";
@@ -574,6 +575,10 @@ async function fetchModelsForSource(
   apiKey: string | undefined,
   providerPlugins: unknown[] = []
 ): Promise<ModelFetchResult> {
+  if (source === "gemini" && isAntigravityBaseUrl(parsed.geminiBaseUrl)) {
+    return fetchAntigravityProbeModels(apiKey);
+  }
+
   if (source === "openai") {
     for (const baseUrl of parsed.openaiBaseUrlCandidates) {
       const request = await providerProbeAuthRequest(
@@ -716,6 +721,9 @@ async function probeProtocolConnectivity(
   protocol: GatewayProviderCapabilityProtocol,
   providerPlugins: unknown[] = []
 ): Promise<GatewayProviderProbeProtocolResult> {
+  if (protocol === "gemini_generate_content" && isAntigravityBaseUrl(parsed.geminiBaseUrl)) {
+    return probeAntigravityConnectivity(apiKey, models);
+  }
   const model = pickProbeModel(models, protocol);
   const endpoints = endpointsForProtocol(parsed, protocol, model);
   const endpoint = endpoints[0]?.endpoint ?? providerBaseUrlForCapability(parsed, protocol);
@@ -1652,6 +1660,100 @@ function orderedProtocols(
   }
   const allowed = new Set(allowedProtocols);
   return ordered.filter((protocol) => allowed.has(protocol));
+}
+
+function isAntigravityBaseUrl(baseUrl: string | undefined): boolean {
+  return Boolean(
+    baseUrl && findProviderPresetByBaseUrl(baseUrl)?.id === "antigravity"
+  );
+}
+
+async function antigravityAccessToken(apiKey: string | undefined): Promise<string | undefined> {
+  if (apiKey && apiKey !== localAgentProviderApiKey) {
+    return apiKey;
+  }
+  return (await resolveAntigravityAuth())?.accessToken;
+}
+
+async function fetchAntigravityProbeModels(apiKey: string | undefined): Promise<ModelFetchResult> {
+  const endpoint = `${antigravityDefaultBaseUrl}/v1internal:fetchAvailableModels`;
+  const token = await antigravityAccessToken(apiKey);
+  if (!token) {
+    return { models: [] };
+  }
+  const result = await requestJson(endpoint, {
+    body: "{}",
+    headers: {
+      ...antigravityIdentityHeaders(),
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json"
+    },
+    method: "POST"
+  });
+  const modelsRecord = isRecord(result.payload) ? result.payload.models : undefined;
+  if (!isRecord(modelsRecord)) {
+    return { models: [] };
+  }
+  // Modelos sem displayName são internos do IDE (tab completion, roteamento
+  // "tiered") e rejeitam generateContent com 400; não são oferecidos.
+  const models = Object.entries(modelsRecord)
+    .filter(([id, meta]) => Boolean(id) && isRecord(meta) && typeof meta.displayName === "string" && meta.displayName)
+    .map(([id]) => id);
+  return { models };
+}
+
+async function probeAntigravityConnectivity(
+  apiKey: string | undefined,
+  models: string[]
+): Promise<GatewayProviderProbeProtocolResult> {
+  const endpoint = `${antigravityDefaultBaseUrl}/v1internal:generateContent`;
+  const token = await antigravityAccessToken(apiKey);
+  const baseResult = {
+    endpoint,
+    message: "Antigravity login not found.",
+    protocol: "gemini_generate_content" as const,
+    supported: false
+  };
+  if (!token) {
+    return baseResult;
+  }
+  // O servidor rejeita geração sem cloudaicompanionProject com um 403 de
+  // licença enganoso; o projeto vem do loadCodeAssist.
+  const project = await loadAntigravityProject(token);
+  if (!project) {
+    return baseResult;
+  }
+  const model = pickProbeModel(models, "gemini_generate_content");
+  if (!model) {
+    return { ...baseResult, message: "Model required before protocol verification." };
+  }
+  const result = await requestJson(endpoint, {
+    body: JSON.stringify({
+      model,
+      project,
+      request: {
+        contents: [{ parts: [{ text: "ping" }], role: "user" }],
+        generationConfig: { maxOutputTokens: 1 }
+      }
+    }),
+    headers: {
+      ...antigravityIdentityHeaders(),
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json"
+    },
+    method: "POST"
+  });
+  const message = readResponseMessage(result);
+  const status = result.status;
+  return {
+    baseUrl: antigravityDefaultBaseUrl,
+    ...(result.detectedProvider ? { detectedProvider: result.detectedProvider } : {}),
+    endpoint,
+    message,
+    protocol: "gemini_generate_content",
+    ...(status === undefined ? {} : { status }),
+    supported: status !== undefined && status >= 200 && status < 300
+  };
 }
 
 function orderedModelSources(

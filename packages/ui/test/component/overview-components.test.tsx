@@ -821,6 +821,18 @@ test("OverviewView does not render an outer progress bar for Codex manual resets
   assert.doesNotMatch(html, /Full reset/);
 });
 
+test("provider account meter percentages omit decimal places", () => {
+  assert.equal(formatProviderAccountMeterValue({
+    id: "antigravity_gemini_weekly",
+    kind: "quota",
+    label: "Gemini Models",
+    limit: 100,
+    remaining: 99.9834,
+    unit: "%",
+    window: "weekly"
+  }), "99%");
+});
+
 test("provider account meter values localize textual units", () => {
   const value = formatProviderAccountMeterValue(
     {
@@ -834,6 +846,49 @@ test("provider account meter values localize textual units", () => {
   );
 
   assert.equal(value, `0 ${appCopy.zh.text.resets}`);
+});
+
+test("OverviewView prioritizes the Antigravity Gemini quota meter", () => {
+  const account: ProviderAccountSnapshot = {
+    credentialId: "antigravity",
+    meters: [
+      {
+        id: "antigravity_3p_weekly",
+        kind: "quota",
+        label: "Claude GPT models",
+        limit: 100,
+        remaining: 100,
+        unit: "%",
+        window: "weekly"
+      },
+      {
+        id: "antigravity_gemini_weekly",
+        kind: "quota",
+        label: "Gemini Models",
+        limit: 100,
+        remaining: 99.9834,
+        unit: "%",
+        window: "weekly"
+      }
+    ],
+    provider: "Antigravity",
+    source: "http-json",
+    status: "ok",
+    updatedAt: "2026-08-23T00:00:00.000Z"
+  };
+  const html = renderToStaticMarkup(
+    <OverviewView
+      overviewWidgets={[{ enabled: true, id: "account", size: "4:2", type: "account-balance", variant: "cards" }]}
+      providerAccounts={[account]}
+      refreshProviderAccounts={() => undefined}
+      setUsageRange={() => undefined}
+      usageRange="30d"
+      usageStats={usageStats("30d")}
+      onWidgetsChange={() => undefined}
+    />
+  );
+
+  assert.ok(html.indexOf("Gemini Models") < html.indexOf("Claude GPT models"));
 });
 
 test("provider account reset credit detail progress uses each validity window", () => {

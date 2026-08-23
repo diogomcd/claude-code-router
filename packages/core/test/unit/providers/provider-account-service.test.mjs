@@ -4,11 +4,16 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  antigravityQuotaMetersForTest,
   localAgentProviderAccountCredentialForTest,
   localCodexAccountCredentialForTest,
   setProviderAccountWebContentFetchHandler,
   testProviderAccountConnector
 } from "@ccr/core/providers/account-service.ts";
+import {
+  antigravityDefaultBaseUrl,
+  antigravityIdentityHeaders
+} from "@ccr/core/agents/local-providers/antigravity.ts";
 import {
   grokDefaultBillingEndpoint,
   grokDefaultBaseUrl,
@@ -20,7 +25,90 @@ const localAgentProviderApiKey = "ccr-local-agent-login";
 const codexDefaultBaseUrl = "https://chatgpt.com/backend-api/codex";
 const zcodeDefaultBaseUrl = "https://zcode.z.ai/api/v1/zcode-plan/anthropic";
 
+test("Antigravity quota connector maps both weekly buckets", () => {
+  const meters = antigravityQuotaMetersForTest({
+    response: {
+      groups: [
+        {
+          buckets: [{
+            bucketId: "gemini-weekly",
+            remainingFraction: 0.75,
+            resetTime: Date.parse("2026-09-01T00:00:00Z") / 1000
+          }],
+          displayName: "Gemini Models"
+        },
+        {
+          buckets: [{
+            bucketId: "3p-weekly",
+            remainingFraction: 0.25,
+            resetTime: "2026-09-01T00:00:00Z"
+          }],
+          displayName: "Claude and GPT models"
+        }
+      ]
+    }
+  });
+
+  assert.equal(meters.length, 2);
+  assert.deepEqual(meters.find((meter) => meter.id === "antigravity_gemini_weekly"), {
+    id: "antigravity_gemini_weekly",
+    kind: "quota",
+    label: "Gemini Models",
+    limit: 100,
+    remaining: 75,
+    resetAt: "2026-09-01T00:00:00.000Z",
+    source: "http-json",
+    unit: "%",
+    used: 25,
+    window: "weekly"
+  });
+  assert.deepEqual(meters.find((meter) => meter.id === "antigravity_3p_weekly"), {
+    id: "antigravity_3p_weekly",
+    kind: "quota",
+    label: "Claude GPT models",
+    limit: 100,
+    remaining: 25,
+    resetAt: "2026-09-01T00:00:00.000Z",
+    source: "http-json",
+    unit: "%",
+    used: 75,
+    window: "weekly"
+  });
+});
+
+test("Antigravity quota parser accepts nested response groups and clamps fractions", () => {
+  const meters = antigravityQuotaMetersForTest({
+    response: {
+      groups: [
+        {
+          buckets: [{
+            bucket_id: "gemini-weekly",
+            remaining_fraction: 1.5,
+            reset_time: Date.parse("2026-09-01T00:00:00Z")
+          }],
+          display_name: "Gemini Models"
+        },
+        {
+          buckets: [{
+            displayName: "Claude GPT models",
+            remainingFraction: -0.2,
+            resetTime: "2026-09-02T00:00:00Z"
+          }]
+        }
+      ]
+    }
+  });
+
+  assert.equal(meters.find((meter) => meter.id === "antigravity_gemini_weekly")?.remaining, 100);
+  assert.equal(meters.find((meter) => meter.id === "antigravity_gemini_weekly")?.used, 0);
+  assert.equal(meters.find((meter) => meter.id === "antigravity_gemini_weekly")?.resetAt, "2026-09-01T00:00:00.000Z");
+  assert.equal(meters.find((meter) => meter.id === "antigravity_3p_weekly")?.remaining, 0);
+  assert.equal(meters.find((meter) => meter.id === "antigravity_3p_weekly")?.used, 100);
+  assert.deepEqual(antigravityQuotaMetersForTest({}), []);
+});
+
 test("Grok billing connector maps credit usage payload", async (t) => {
+  useTemporaryHome(t, "ccr-grok-billing-");
   const previousFetch = globalThis.fetch;
   let authorization = "";
   let clientIdentifier = "";
@@ -67,6 +155,7 @@ test("Grok billing connector maps credit usage payload", async (t) => {
 });
 
 test("Grok subscription connector maps access status payload", async (t) => {
+  useTemporaryHome(t, "ccr-grok-sub-");
   const previousFetch = globalThis.fetch;
   let authorization = "";
   let clientIdentifier = "";
@@ -222,6 +311,75 @@ test("webcontent-json connector reports unsupported outside CCR Desktop", async 
     }),
     /only available in CCR Desktop/
   );
+});
+
+test("Antigravity local account credential prefers live auth and adds identity headers", async (t) => {
+  const home = useTemporaryAntigravityHome(t, "ccr-antigravity-account-live-");
+  writeFileSync(
+    path.join(home, ".gemini", "oauth_creds.json"),
+    JSON.stringify({ access_token: "live-antigravity-token", expiry_date: Date.now() + 600_000 })
+  );
+
+  const credential = await localAgentProviderAccountCredentialForTest({
+    providerPlugins: [{
+      auth: {
+        headers: {
+          authorization: "Bearer plugin-token",
+          "x-preserved": "yes"
+        }
+      },
+      key: "ccr-local-agent-antigravity-antigravity-oauth",
+      providerName: "Antigravity"
+    }]
+  }, {
+    api_key: localAgentProviderApiKey,
+    baseUrl: antigravityDefaultBaseUrl,
+    id: "antigravity",
+    models: ["gemini-3.1-pro-low"],
+    name: "Antigravity",
+    type: "gemini_generate_content"
+  });
+
+  assert.equal(credential?.apiKey, "live-antigravity-token");
+  assert.equal(credential?.headers?.authorization, undefined);
+  assert.equal(credential?.headers?.["x-preserved"], "yes");
+  assert.deepEqual(
+    {
+      "user-agent": credential?.headers?.["user-agent"],
+      "x-goog-api-client": credential?.headers?.["x-goog-api-client"]
+    },
+    antigravityIdentityHeaders()
+  );
+});
+
+test("Antigravity local account credential falls back to the plugin token", async (t) => {
+  const home = useTemporaryAntigravityHome(t, "ccr-antigravity-account-fallback-");
+  writeFileSync(
+    path.join(home, ".gemini", "oauth_creds.json"),
+    JSON.stringify({ access_token: "expired-antigravity-token", expiry_date: Date.now() - 60_000 })
+  );
+
+  const credential = await localAgentProviderAccountCredentialForTest({
+    providerPlugins: [{
+      auth: {
+        headers: {
+          Authorization: "Bearer plugin-fallback-token"
+        }
+      },
+      key: "ccr-local-agent-antigravity-antigravity-oauth-internal",
+      providerName: "Antigravity"
+    }]
+  }, {
+    apiKey: localAgentProviderApiKey,
+    baseUrl: antigravityDefaultBaseUrl,
+    id: "antigravity",
+    models: [],
+    name: "Antigravity",
+    type: "gemini_generate_content"
+  });
+
+  assert.equal(credential?.apiKey, "plugin-fallback-token");
+  assert.equal(credential?.headers?.Authorization, undefined);
 });
 
 test("Codex local account credential refreshes when only a refresh token is available", async (t) => {
@@ -481,6 +639,24 @@ test("ZCode local account credential falls back to the live config when plugin i
 
   assert.equal(credential?.apiKey, "zcode-live-key");
 });
+
+function useTemporaryAntigravityHome(t, prefix) {
+  const home = useTemporaryHome(t, prefix);
+  mkdirSync(path.join(home, ".gemini"), { recursive: true });
+  const previousPath = process.env.PATH;
+  process.env.PATH = (previousPath ?? "")
+    .split(path.delimiter)
+    .filter((entry) => entry && !existsSync(path.join(entry, "secret-tool")))
+    .join(path.delimiter);
+  t.after(() => {
+    if (previousPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = previousPath;
+    }
+  });
+  return home;
+}
 
 function useTemporaryCodexHome(t, prefix) {
   const home = useTemporaryHome(t, prefix);

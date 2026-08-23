@@ -1,15 +1,19 @@
-import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import type {
+  GatewayProviderConfig,
   LocalAgentProviderCandidate,
-  LocalAgentProviderImportResult
+  LocalAgentProviderImportResult,
+  ProviderAccountConfig,
+  ProviderAccountConnectorConfig
 } from "@ccr/core/contracts/app";
 import { fetchWithSystemProxy } from "@ccr/core/proxy/system-proxy-fetch";
+import { antigravityLanguageServerQuotaEndpoint } from "@ccr/core/providers/antigravity-account";
+import { normalizeProviderBaseUrl } from "@ccr/core/providers/url";
 import {
   bearerAuthPlugin,
+  localAgentProviderApiKey,
   missingCandidate,
   providerInternalNamePlaceholder,
   providerPayload,
@@ -20,12 +24,12 @@ import {
 } from "@ccr/core/agents/local-providers/shared";
 
 export const antigravityDefaultBaseUrl = "https://daily-cloudcode-pa.googleapis.com";
-export const antigravityOAuthTokenUrl = "https://oauth2.googleapis.com/token";
+const legacyAntigravityQuotaEndpoint = `${antigravityDefaultBaseUrl}/v1internal:retrieveUserQuotaSummary`;
 
-const antigravityOauthClientId = "884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com";
-const antigravityOauthClientSecret = "REDACTED";
-const antigravityIdeVersion = "1.0.0";
-const antigravityRefreshTimeoutMs = 20_000;
+const antigravityClientVersion = "2.8.1";
+// Changelist do build 2.8.1 do language server oficial; o servidor valida o
+// par versão/changelist e responde 403 quando o cliente não é reconhecido.
+const antigravityServerChangelist = "963775910";
 const accessTokenExpiryMarginMs = 60_000;
 const secondsToMillisecondsThreshold = 1e12;
 
@@ -94,31 +98,34 @@ export async function loadAntigravityProject(accessToken: string): Promise<strin
   if (cached && cached.expiresAt > Date.now()) {
     return cached.project;
   }
-  const payload = await postAntigravityInternal("loadCodeAssist", accessToken, { metadata: {} });
+  const payload = await postAntigravityInternal("loadCodeAssist", accessToken, {
+    metadata: { ideType: "ANTIGRAVITY" }
+  });
   const project = findCloudAiCompanionProject(payload) ?? "";
-  if (project) {
-    antigravityProjectCache.set(accessToken, {
-      expiresAt: Date.now() + antigravityProjectCacheTtlMs,
-      project
-    });
-  }
+  // Cacheia também o vazio: sem projeto o servidor responde 403 em toda geração,
+  // e reinterrogar loadCodeAssist a cada request não muda o resultado.
+  antigravityProjectCache.set(accessToken, {
+    expiresAt: Date.now() + antigravityProjectCacheTtlMs,
+    project
+  });
   return project;
 }
 
 export async function fetchAntigravityModels(
   accessToken: string
 ): Promise<Array<{ id: string; displayName?: string }>> {
-  const payload = await postAntigravityInternal("fetchAvailableModels", accessToken, { metadata: {} });
+  const payload = await postAntigravityInternal("fetchAvailableModels", accessToken, {});
   const models = payload?.models;
   if (!isPlainRecord(models)) {
     return [];
   }
   return Object.entries(models).flatMap(([id, meta]) => {
-    if (!id) {
+    // Modelos sem displayName são internos do IDE (tab completion, roteamento
+    // "tiered") e rejeitam generateContent com 400; nunca são chamáveis.
+    if (!id || !isPlainRecord(meta) || !readString(meta.displayName)) {
       return [];
     }
-    const displayName = isPlainRecord(meta) ? readString(meta.displayName) : undefined;
-    return [{ id, ...(displayName ? { displayName } : {}) }];
+    return [{ id, displayName: readString(meta.displayName) }];
   });
 }
 
@@ -133,7 +140,7 @@ export function antigravityCandidate(): LocalAgentProviderCandidate {
       antigravityFallbackModels
     );
   }
-  if (antigravityAccessTokenExpired(auth) && !auth.refreshToken) {
+  if (antigravityAccessTokenExpired(auth)) {
     return {
       detail: "Antigravity login was detected, but the access token expired. Sign in to Antigravity again, then rescan.",
       id: antigravityCandidateId,
@@ -185,7 +192,8 @@ export async function importAntigravityProvider(
   const provider = providerPayload(
     nextCandidate,
     uniqueProviderName(providerNames, antigravityProviderName),
-    antigravityDefaultBaseUrl
+    antigravityDefaultBaseUrl,
+    antigravityProviderAccountConfig()
   );
   return {
     candidate: nextCandidate,
@@ -195,6 +203,79 @@ export async function importAntigravityProvider(
       antigravityAuthPlugin("antigravity-oauth-internal", auth.accessToken, project, providerInternalNamePlaceholder)
     ]
   };
+}
+
+export function antigravityProviderAccountConfig(): ProviderAccountConfig {
+  return {
+    connectors: [
+      {
+        auth: "none",
+        endpoint: antigravityLanguageServerQuotaEndpoint,
+        mapping: {
+          meters: []
+        },
+        method: "POST",
+        parser: "antigravity-quota",
+        type: "http-json"
+      }
+    ],
+    enabled: true
+  };
+}
+
+export function normalizeAntigravityProviderAccountConfig(provider: GatewayProviderConfig): GatewayProviderConfig {
+  if (!isLocalAntigravityProvider(provider) || !shouldUseCurrentAntigravityAccountConfig(provider.account)) {
+    return provider;
+  }
+  const account = antigravityProviderAccountConfig();
+  return {
+    ...provider,
+    account: {
+      ...account,
+      refreshIntervalMs: provider.account?.refreshIntervalMs ?? account.refreshIntervalMs
+    }
+  };
+}
+
+function isLocalAntigravityProvider(provider: GatewayProviderConfig): boolean {
+  if (providerApiKey(provider) !== localAgentProviderApiKey) {
+    return false;
+  }
+  const baseUrl = normalizeProviderBaseUrl(providerBaseUrl(provider)).toLowerCase();
+  const name = provider.name?.trim().toLowerCase() ?? "";
+  return baseUrl.includes("daily-cloudcode-pa.googleapis.com") || name.includes("antigravity");
+}
+
+function shouldUseCurrentAntigravityAccountConfig(account: ProviderAccountConfig | undefined): boolean {
+  if (account?.enabled === false) {
+    return false;
+  }
+  const connectors = account?.connectors ?? [];
+  if (connectors.length === 0) {
+    return true;
+  }
+  return connectors.every(isAntigravityAccountConnector);
+}
+
+function isAntigravityAccountConnector(connector: ProviderAccountConnectorConfig): boolean {
+  if (connector.type === "standard") {
+    return !connector.endpoint?.trim() && !connector.endpoints?.length && !connector.headers && !connector.id;
+  }
+  if (connector.type !== "http-json") {
+    return false;
+  }
+  const endpoint = connector.endpoint.trim();
+  return connector.parser === "antigravity-quota" && (
+    endpoint === antigravityLanguageServerQuotaEndpoint || endpoint === legacyAntigravityQuotaEndpoint
+  );
+}
+
+function providerBaseUrl(provider: GatewayProviderConfig): string {
+  return provider.api_base_url || provider.baseUrl || provider.baseurl || "";
+}
+
+function providerApiKey(provider: GatewayProviderConfig): string {
+  return provider.api_key || provider.apiKey || provider.apikey || "";
 }
 
 function antigravityAuthPlugin(
@@ -214,16 +295,11 @@ function antigravityAuthPlugin(
 }
 export interface AntigravityTokenSet {
   accessToken: string;
-  refreshToken?: string;
   expiryDate?: number;
   idToken?: string;
   scope?: string;
   sourceFile: string;
 }
-
-class AntigravityRefreshRejectedError extends Error {}
-
-const antigravityRefreshInFlight = new Map<string, Promise<AntigravityTokenSet | undefined>>();
 
 function antigravityStorageRoot(): string {
   const internalHome = process.env.CCR_INTERNAL_HOME_DIR?.trim();
@@ -256,7 +332,6 @@ export function readAntigravityAuth(sourceFile?: string): AntigravityTokenSet | 
     accessToken,
     expiryDate: normalizeExpiryDate(record.expiry_date ?? record.expiryDate),
     idToken: readString(record.id_token) || readString(record.idToken),
-    refreshToken: readString(record.refresh_token) || readString(record.refreshToken),
     scope: readString(record.scope),
     sourceFile: file
   };
@@ -265,36 +340,38 @@ export function readAntigravityAuth(sourceFile?: string): AntigravityTokenSet | 
 export const antigravityKeyringSourceFile = `keyring:${antigravityKeyringService}/${antigravityKeyringUsername}`;
 
 export function readAntigravityKeyringAuth(): AntigravityTokenSet | undefined {
+  // O secret-tool imprime os atributos (service, username) no stderr e o
+  // segredo no stdout; só o stdout não contém o username para filtrar.
   let output = "";
   try {
-    output = execFileSync("secret-tool", ["search", "--all", "service", antigravityKeyringService], {
+    const result = spawnSync("secret-tool", ["search", "--all", "service", antigravityKeyringService], {
       encoding: "utf8",
       timeout: antigravityKeyringTimeoutMs
     });
+    if (result.error || result.status !== 0) {
+      return undefined;
+    }
+    output = `${result.stderr}\n${result.stdout}`;
   } catch {
     return undefined;
   }
-  for (const block of output.split(/\n\s*\n/)) {
-    if (!block.includes(`attribute.username = ${antigravityKeyringUsername}`)) {
-      continue;
-    }
-    const secret = block.match(/^secret = (.+)$/m)?.[1];
-    const token = secret ? parseRecord(secret)?.token : undefined;
-    if (!isPlainRecord(token)) {
-      continue;
-    }
-    const accessToken = readString(token.access_token);
-    if (!accessToken) {
-      continue;
-    }
-    return {
-      accessToken,
-      expiryDate: normalizeKeyringExpiry(token.expiry),
-      refreshToken: readString(token.refresh_token),
-      sourceFile: antigravityKeyringSourceFile
-    };
+  if (!output.includes(`attribute.username = ${antigravityKeyringUsername}`)) {
+    return undefined;
   }
-  return undefined;
+  const secret = output.match(/^secret = (.+)$/m)?.[1];
+  const token = secret ? parseRecord(secret)?.token : undefined;
+  if (!isPlainRecord(token)) {
+    return undefined;
+  }
+  const accessToken = readString(token.access_token);
+  if (!accessToken) {
+    return undefined;
+  }
+  return {
+    accessToken,
+    expiryDate: normalizeKeyringExpiry(token.expiry),
+    sourceFile: antigravityKeyringSourceFile
+  };
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -314,20 +391,7 @@ export async function resolveAntigravityAuth(
   reference?: { sourceFile?: string }
 ): Promise<AntigravityTokenSet | undefined> {
   const auth = liveAntigravityAuth(reference?.sourceFile);
-  if (!auth?.refreshToken || !antigravityAccessTokenExpired(auth)) {
-    return auth;
-  }
-  const key = auth.sourceFile;
-  let refresh = antigravityRefreshInFlight.get(key);
-  if (!refresh) {
-    refresh = refreshAntigravityAuth(auth)
-      .catch((error: unknown) => adoptPeerRotatedAntigravityAuth(auth, error))
-      .finally(() => {
-        antigravityRefreshInFlight.delete(key);
-      });
-    antigravityRefreshInFlight.set(key, refresh);
-  }
-  return refresh;
+  return auth?.accessToken && !antigravityAccessTokenExpired(auth) ? auth : undefined;
 }
 
 function liveAntigravityAuth(sourceFile?: string): AntigravityTokenSet | undefined {
@@ -336,75 +400,6 @@ function liveAntigravityAuth(sourceFile?: string): AntigravityTokenSet | undefin
     return fileAuth;
   }
   return readAntigravityKeyringAuth() ?? fileAuth;
-}
-
-function adoptPeerRotatedAntigravityAuth(
-  auth: AntigravityTokenSet,
-  error: unknown
-): AntigravityTokenSet | undefined {
-  if (error instanceof AntigravityRefreshRejectedError) {
-    const latest = liveAntigravityAuth(
-      auth.sourceFile === antigravityKeyringSourceFile ? undefined : auth.sourceFile
-    );
-    if (latest?.accessToken && !antigravityAccessTokenExpired(latest)) {
-      return latest;
-    }
-  }
-  return auth;
-}
-
-async function refreshAntigravityAuth(auth: AntigravityTokenSet): Promise<AntigravityTokenSet> {
-  if (!auth.refreshToken) {
-    return auth;
-  }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), antigravityRefreshTimeoutMs);
-  try {
-    const response = await fetchWithSystemProxy(antigravityOAuthTokenUrl, {
-      body: new URLSearchParams({
-        client_id: antigravityOauthClientId,
-        client_secret: antigravityOauthClientSecret,
-        grant_type: "refresh_token",
-        refresh_token: auth.refreshToken
-      }).toString(),
-      headers: {
-        accept: "application/json",
-        "content-type": "application/x-www-form-urlencoded"
-      },
-      method: "POST",
-      signal: controller.signal
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      if (response.status === 400 || response.status === 401) {
-        throw new AntigravityRefreshRejectedError(
-          `Antigravity OAuth token refresh returned HTTP ${response.status}.`
-        );
-      }
-      throw new Error(`Antigravity OAuth token refresh returned HTTP ${response.status}.`);
-    }
-    const payload = parseRecord(text);
-    const accessToken = readString(payload?.access_token) || readString(payload?.accessToken);
-    if (!accessToken) {
-      throw new Error("Antigravity OAuth token refresh returned an incomplete token response.");
-    }
-    const expiresIn = payload?.expires_in ?? payload?.expiresIn;
-    const refreshed: AntigravityTokenSet = {
-      ...auth,
-      accessToken,
-      expiryDate: typeof expiresIn === "number" && Number.isFinite(expiresIn)
-        ? Date.now() + expiresIn * 1000
-        : auth.expiryDate,
-      refreshToken: readString(payload?.refresh_token) || readString(payload?.refreshToken) || auth.refreshToken,
-      scope: readString(payload?.scope) || auth.scope
-    };
-    if (refreshed.sourceFile !== antigravityKeyringSourceFile) {
-      persistAntigravityAuth(refreshed);
-    }
-    return refreshed;
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function parseRecord(value: string): Record<string, unknown> | undefined {
@@ -418,42 +413,20 @@ function parseRecord(value: string): Record<string, unknown> | undefined {
   }
 }
 
-export function persistAntigravityAuth(auth: AntigravityTokenSet): void {
-  if (!auth.accessToken || !existsSync(auth.sourceFile)) {
-    return;
-  }
-  const original = readJsonRecord(auth.sourceFile) ?? {};
-  const payload: Record<string, unknown> = {
-    ...original,
-    access_token: auth.accessToken
-  };
-  if (auth.refreshToken) {
-    payload.refresh_token = auth.refreshToken;
-  }
-  if (auth.expiryDate !== undefined) {
-    payload.expiry_date = auth.expiryDate;
-  }
-  if (auth.scope) {
-    payload.scope = auth.scope;
-  }
-  const temporaryFile = `${auth.sourceFile}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    writeFileSync(temporaryFile, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    renameSync(temporaryFile, auth.sourceFile);
-    chmodSync(auth.sourceFile, 0o600);
-  } catch {
-    try {
-      rmSync(temporaryFile, { force: true });
-    } catch {
-      // Best effort. The refreshed access token is still usable for this CCR run.
-    }
-  }
-}
-
 export function antigravityIdentityHeaders(): Record<string, string> {
   const nodeMajor = process.versions.node.split(".")[0];
   return {
-    "user-agent": process.env.ANTIGRAVITY_IDE_USER_AGENT?.trim() || `antigravity-ide/${antigravityIdeVersion}`,
+    "user-agent": process.env.ANTIGRAVITY_IDE_USER_AGENT?.trim() || antigravityLanguageServerUserAgent(),
     "x-goog-api-client": process.env.ANTIGRAVITY_API_CLIENT_HEADER?.trim() || `gl-node/${nodeMajor}`
   };
+}
+
+function antigravityLanguageServerUserAgent(): string {
+  const osType = process.platform === "darwin"
+    ? "darwin"
+    : process.platform === "win32"
+      ? "windows"
+      : "linux";
+  const arch = process.arch === "x64" ? "amd64" : process.arch;
+  return `antigravity/hub/${antigravityClientVersion} (aidev_client; os_type=${osType}; arch=${arch}; cl=${antigravityServerChangelist})`;
 }

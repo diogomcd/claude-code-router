@@ -874,6 +874,70 @@ test("New API user self parser returns user balance", () => {
   }]);
 });
 
+test("antigravity probe lists models and checks connectivity via v1internal", async (t) => {
+  const home = useTemporaryCodexHome(t, "ccr-antigravity-probe-test-");
+  fs.mkdirSync(path.join(home, ".gemini"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".gemini", "oauth_creds.json"), JSON.stringify({
+    access_token: "antigravity-probe-token",
+    expiry_date: Date.now() + 3600_000,
+    refresh_token: "refresh-token"
+  }));
+
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    calls.push({ body: String(init?.body ?? ""), url });
+    if (url.includes(":fetchAvailableModels")) {
+      return new Response(JSON.stringify({
+        models: {
+          "claude-sonnet-4-6": { displayName: "Claude Sonnet 4.6" },
+          "gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)" },
+          "gemini-3.6-flash-medium": { displayName: "Gemini 3.6 Flash (Medium)" }
+        }
+      }), { status: 200 });
+    }
+    if (url.includes(":loadCodeAssist")) {
+      return new Response(JSON.stringify({ cloudaicompanionProject: "ccr-probe-project" }), { status: 200 });
+    }
+    if (url.includes(":generateContent")) {
+      return new Response(JSON.stringify({
+        response: { candidates: [{ content: { parts: [{ text: "ok" }], role: "model" } }] }
+      }), { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  };
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+  });
+
+  const modelProbe = await probeGatewayProviderCandidates({
+    apiKey: "ccr-local-agent-login",
+    candidates: [{ baseUrl: "https://daily-cloudcode-pa.googleapis.com", protocols: ["gemini_generate_content"] }],
+    mode: "models",
+    protocols: ["gemini_generate_content"]
+  });
+  assert.deepEqual(
+    [...(modelProbe?.probe.models ?? [])].sort(),
+    ["claude-sonnet-4-6", "gemini-3.1-pro-low", "gemini-3.6-flash-medium"]
+  );
+
+  const report = await checkGatewayProviderConnectivity({
+    apiKey: "ccr-local-agent-login",
+    candidates: [{ baseUrl: "https://daily-cloudcode-pa.googleapis.com", protocols: ["gemini_generate_content"] }],
+    models: ["gemini-3.6-flash-medium"]
+  });
+  const protocol = report.results[0]?.protocols.find((item) => item.protocol === "gemini_generate_content");
+  assert.equal(protocol?.supported, true);
+  assert.equal(protocol?.endpoint, "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent");
+
+  const generateCall = calls.filter((call) => call.url.endsWith(":generateContent")).at(-1);
+  const generateBody = JSON.parse(generateCall?.body ?? "{}");
+  assert.equal(generateBody.project, "ccr-probe-project");
+  assert.equal(generateBody.model, "gemini-3.6-flash-medium");
+  assert.ok(generateBody.request?.contents?.length > 0);
+});
+
 function jwt(payload) {
   return [
     base64url({ alg: "none", typ: "JWT" }),
@@ -881,7 +945,6 @@ function jwt(payload) {
     ""
   ].join(".");
 }
-
 function base64url(value) {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
