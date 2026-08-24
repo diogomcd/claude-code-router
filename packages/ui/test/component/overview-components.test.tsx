@@ -869,6 +869,24 @@ test("OverviewView prioritizes the Antigravity Gemini quota meter", () => {
         remaining: 99.9834,
         unit: "%",
         window: "weekly"
+      },
+      {
+        id: "antigravity_3p_5h",
+        kind: "quota",
+        label: "Claude GPT models (5h)",
+        limit: 100,
+        remaining: 80,
+        unit: "%",
+        window: "5h"
+      },
+      {
+        id: "antigravity_gemini_5h",
+        kind: "quota",
+        label: "Gemini Models (5h)",
+        limit: 100,
+        remaining: 70,
+        unit: "%",
+        window: "5h"
       }
     ],
     provider: "Antigravity",

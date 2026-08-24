@@ -1356,14 +1356,28 @@ function uniqueKimiCodeUsageMeterId(id: string, seenIds: Set<string>): string {
 
 const antigravityQuotaBucketDefinitions = [
   {
+    bucketId: "gemini-5h",
+    id: "antigravity_gemini_5h",
+    label: "Gemini Models (5h)",
+    window: "5h"
+  },
+  {
     bucketId: "gemini-weekly",
     id: "antigravity_gemini_weekly",
-    label: "Gemini Models"
+    label: "Gemini Models",
+    window: "weekly"
+  },
+  {
+    bucketId: "3p-5h",
+    id: "antigravity_3p_5h",
+    label: "Claude GPT models (5h)",
+    window: "5h"
   },
   {
     bucketId: "3p-weekly",
     id: "antigravity_3p_weekly",
-    label: "Claude GPT models"
+    label: "Claude GPT models",
+    window: "weekly"
   }
 ] as const;
 
@@ -1403,7 +1417,7 @@ function antigravityQuotaMeters(
         resetAt: antigravityQuotaResetAt(bucket) ?? (bucket === group ? undefined : antigravityQuotaResetAt(group)),
         unit: "%",
         used: 100 - remaining,
-        window: "weekly"
+        window: definition.window
       }, source);
       if (meter) {
         meters.push(meter);

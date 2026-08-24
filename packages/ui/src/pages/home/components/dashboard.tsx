@@ -4030,10 +4030,10 @@ function compareProviderAccountQuotaMeters(a: ProviderAccountMeter, b: ProviderA
 
 function providerAccountQuotaPriority(meter: ProviderAccountMeter): number {
   const id = meter.id.trim().toLowerCase();
-  if (id === "antigravity_gemini_weekly") {
+  if (id.startsWith("antigravity_gemini")) {
     return 0;
   }
-  if (id === "antigravity_3p_weekly") {
+  if (id.startsWith("antigravity_3p")) {
     return 1;
   }
   return 2;

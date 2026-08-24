@@ -25,7 +25,7 @@ const localAgentProviderApiKey = "ccr-local-agent-login";
 const codexDefaultBaseUrl = "https://chatgpt.com/backend-api/codex";
 const zcodeDefaultBaseUrl = "https://zcode.z.ai/api/v1/zcode-plan/anthropic";
 
-test("Antigravity quota connector maps both weekly buckets", () => {
+test("Antigravity quota connector maps weekly and five hour buckets", () => {
   const meters = antigravityQuotaMetersForTest({
     response: {
       groups: [
@@ -39,9 +39,25 @@ test("Antigravity quota connector maps both weekly buckets", () => {
         },
         {
           buckets: [{
+            bucketId: "gemini-5h",
+            remainingFraction: 0.5,
+            resetTime: "2026-08-24T00:00:00Z"
+          }],
+          displayName: "Gemini Models"
+        },
+        {
+          buckets: [{
             bucketId: "3p-weekly",
             remainingFraction: 0.25,
             resetTime: "2026-09-01T00:00:00Z"
+          }],
+          displayName: "Claude and GPT models"
+        },
+        {
+          buckets: [{
+            bucketId: "3p-5h",
+            remainingFraction: 0.9,
+            resetTime: "2026-08-24T00:00:00Z"
           }],
           displayName: "Claude and GPT models"
         }
@@ -49,7 +65,7 @@ test("Antigravity quota connector maps both weekly buckets", () => {
     }
   });
 
-  assert.equal(meters.length, 2);
+  assert.equal(meters.length, 4);
   assert.deepEqual(meters.find((meter) => meter.id === "antigravity_gemini_weekly"), {
     id: "antigravity_gemini_weekly",
     kind: "quota",
@@ -62,6 +78,18 @@ test("Antigravity quota connector maps both weekly buckets", () => {
     used: 25,
     window: "weekly"
   });
+  assert.deepEqual(meters.find((meter) => meter.id === "antigravity_gemini_5h"), {
+    id: "antigravity_gemini_5h",
+    kind: "quota",
+    label: "Gemini Models (5h)",
+    limit: 100,
+    remaining: 50,
+    resetAt: "2026-08-24T00:00:00.000Z",
+    source: "http-json",
+    unit: "%",
+    used: 50,
+    window: "5h"
+  });
   assert.deepEqual(meters.find((meter) => meter.id === "antigravity_3p_weekly"), {
     id: "antigravity_3p_weekly",
     kind: "quota",
@@ -73,6 +101,18 @@ test("Antigravity quota connector maps both weekly buckets", () => {
     unit: "%",
     used: 75,
     window: "weekly"
+  });
+  assert.deepEqual(meters.find((meter) => meter.id === "antigravity_3p_5h"), {
+    id: "antigravity_3p_5h",
+    kind: "quota",
+    label: "Claude GPT models (5h)",
+    limit: 100,
+    remaining: 90,
+    resetAt: "2026-08-24T00:00:00.000Z",
+    source: "http-json",
+    unit: "%",
+    used: 10,
+    window: "5h"
   });
 });
 
