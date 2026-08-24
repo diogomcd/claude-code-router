@@ -5,8 +5,9 @@ import { toCommandCodeRequest } from "./request-translator.mjs";
 import { createNdjsonEventParser, createOpenAiStreamMapper } from "./response-translator.mjs";
 import { aggregateCompletion } from "./completion-aggregator.mjs";
 import { callCommandCode } from "./upstream-client.mjs";
+import { readCommandCodeModels, readCommandCodeCatalogModels } from "./cli-config.mjs";
 
-function sendJson(res, statusCode, payload) {
+export function sendJson(res, statusCode, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(statusCode, { "content-type": "application/json" });
   res.end(body);
@@ -22,6 +23,19 @@ export function createRequestHandler(options) {
 
     if (req.method === "GET" && url.pathname === "/health") {
       sendJson(res, 200, { status: "ok" });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/v1/models") {
+      const configured = readCommandCodeModels();
+      const ids = new Set(readCommandCodeCatalogModels());
+      for (const id of configured) ids.add(id);
+      const models = [...ids].map((id) => ({
+        id,
+        object: "model",
+        owned_by: "command-code",
+      }));
+      sendJson(res, 200, { object: "list", data: models });
       return;
     }
 
