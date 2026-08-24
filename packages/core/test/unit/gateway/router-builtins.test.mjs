@@ -2566,8 +2566,8 @@ test("built-in Claude Code subagent env route requires the request and profile m
     url: "/v1/messages"
   });
 
-  assert.equal(result.body.model, "Codex API/gpt-5.6-sol");
-  assert.equal(result.decision.reason, "builtin:claude-code");
+  assert.equal(result.body.model, "DeepSeek/deepseek-v4-pro");
+  assert.equal(result.decision.reason, "default");
 });
 
 test("built-in Claude Code subagent env route ignores an unconfigured profile model", async () => {
@@ -2752,8 +2752,8 @@ test("built-in Claude Code subagent env route uses the authenticated profile onl
 
   assert.equal(selected.body.model, "DeepSeek/deepseek-v4-flash");
   assert.equal(selected.decision.reason, "builtin:claude-code-subagent-env");
-  assert.equal(rejected.body.model, "Codex API/gpt-5.6-sol");
-  assert.equal(rejected.decision.reason, "builtin:claude-code");
+  assert.equal(rejected.body.model, "DeepSeek/deepseek-v4-pro");
+  assert.equal(rejected.decision.reason, "default");
 });
 
 test("built-in Claude Code subagent env route accepts legacy JSON billing metadata", async () => {
