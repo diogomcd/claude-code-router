@@ -39,12 +39,12 @@ import {
 } from "@ccr/core/agents/pi/profile-config";
 import { CONFIGDIR } from "@ccr/core/config/constants";
 import { pruneInactiveProfileApiKeysFromList, syncProfileApiKeys } from "@ccr/core/profiles/api-key";
-import { filterModelIdsForProfile, profileAllowedModels } from "@ccr/core/profiles/model-allowlist";
+import { profileAllowedModels } from "@ccr/core/profiles/model-allowlist";
 import { refreshClaudeAppModelDiscoveryCache } from "@ccr/core/agents/claude-app/gateway-service";
 import { resolveClaudeAppProfileUserDataDir } from "@ccr/core/agents/claude-app/launch";
 import { resolveZcodeConfigFile, writeZcodeGatewayConfig, zcodeHomeFromConfigFile } from "@ccr/core/agents/zcode/profile-config";
-import { CONTEXT_ARCHIVE_MCP_SERVER_NAME, contextArchiveConfigForProfile, contextArchiveMcpServer } from "@ccr/core/gateway/context-archive";
-import { createClaudeCliAutoCompactWindows } from "@ccr/core/gateway/features/model-discovery";
+import { CONTEXT_ARCHIVE_MCP_SERVER_NAME, contextArchiveConfigForProfile, contextArchiveMcpEnabled, contextArchiveMcpServer } from "@ccr/core/gateway/context-archive";
+import { claudeClientDiscoveryPayloads, createClaudeCliAutoCompactWindows } from "@ccr/core/gateway/features/model-discovery";
 import { claudeCodeOneMillionContextSuffix } from "@ccr/core/gateway/internal/shared";
 import { normalizeRouteSelector } from "@ccr/core/gateway/claude-code-router-plugin";
 import { findModelCatalogEntry, modelCatalogMaxInputTokens, readCatalogCapability, type ModelCatalogEntry } from "@ccr/core/gateway/model-catalog";
@@ -391,13 +391,13 @@ function applyClaudeCodeProfile(config: AppConfig, profile: ProfileConfig, token
     return restoreDisabledGlobalProfile(profile, settingsFile, "Claude Code profile is disabled.", isManagedClaudeCodeSettingsContent);
   }
 
-  if (claudeProfileModelDiscoveryChanged(config, profile)) {
-    invalidateClaudeCodeGatewayModelCache(settingsFile);
-    invalidateClaudeAppModelDiscoveryCache(profile);
-    rememberClaudeProfileModelDiscoveryFingerprint(config, profile);
-  }
-
   try {
+    if (claudeProfileModelDiscoveryChanged(config, profile)) {
+      invalidateClaudeCodeGatewayModelCache(settingsFile);
+      invalidateClaudeAppModelDiscoveryCache(profile);
+      rememberClaudeProfileModelDiscoveryFingerprint(config, profile);
+    }
+
     const endpoint = gatewayEndpoint(config);
     const settings = readClaudeCodeSettingsObject(settingsFile);
     const settingsEnv = withoutBotGatewayEnv(Object.fromEntries(stringRecord(settings.env)));
@@ -486,13 +486,13 @@ function claudeProfileModelDiscoveryChanged(config: AppConfig, profile: ProfileC
 }
 
 function claudeProfileModelDiscoveryFingerprint(config: AppConfig, profile: ProfileConfig): string {
-  const discoverableModels = filterModelIdsForProfile(
-    config,
-    availableGatewayModelIds(config),
+  const contextArchiveConfig = contextArchiveConfigForProfile(config, profile);
+  const payloads = claudeClientDiscoveryPayloads(config, {
+    contextArchiveCompact: Boolean(contextArchiveConfig && contextArchiveMcpEnabled(contextArchiveConfig)),
     profile
-  );
+  });
   return createHash("sha256")
-    .update(JSON.stringify(discoverableModels))
+    .update(JSON.stringify(payloads))
     .digest("hex");
 }
 
