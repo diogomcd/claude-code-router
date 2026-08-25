@@ -210,6 +210,21 @@ export type ProviderModelPricing = {
   outputUsdPerMillionTokens?: number;
 };
 
+export type ProviderModelOpenRouterDiscountRoutingConfig = {
+  allowFallbacks?: boolean;
+  cacheHitRate?: number;
+  enabled?: boolean;
+  endpointTtlMs?: number;
+  minOutputTokens?: number;
+  minSavingsRatio?: number;
+  minSavingsUsd?: number;
+  minUptime5m?: number;
+  outputTokenRatio?: number;
+  providerBlacklist?: string[];
+  requireParameters?: boolean;
+  respectExistingProviderOrder?: boolean;
+};
+
 export type ProviderModelMetadata = {
   additionalSpeedTiers?: unknown[];
   capabilities?: ProviderModelCapabilities;
@@ -219,8 +234,10 @@ export type ProviderModelMetadata = {
   effectiveContextWindowPercent?: number;
   maxContextWindow?: number;
   maxOutputTokens?: number;
+  openRouterDiscountRouting?: ProviderModelOpenRouterDiscountRoutingConfig;
   pricing?: ProviderModelPricing;
   serviceTiers?: unknown[];
+  supportsFastMode?: boolean;
   supportedReasoningLevels?: ProviderReasoningLevel[];
   supportsReasoningSummaries?: boolean;
 };
@@ -474,6 +491,25 @@ export type ProviderCatalogModelsResult = {
   models: string[];
   provider?: string;
   providerName?: string;
+};
+
+export type OpenRouterProviderCatalogRequest = {
+  apiKey?: string;
+  baseUrl?: string;
+  model?: string;
+};
+
+export type OpenRouterProviderCatalogItem = {
+  name: string;
+  quantizations?: string[];
+  slug: string;
+  tokensYesterday?: number;
+  uptimePercent?: number;
+};
+
+export type OpenRouterProviderCatalogResult = {
+  loadedFrom?: string;
+  providers: OpenRouterProviderCatalogItem[];
 };
 
 export type ProviderAccountTestRequest = {
@@ -836,6 +872,7 @@ export const GATEWAY_PLUGIN_PERMISSION_IDS = [
   "proxy-routes",
   "http-backends",
   "provider-account-connectors",
+  "gateway-request-transforms",
   "core-gateway-config",
   "core-provider-plugins",
   "virtual-model-profiles",
@@ -1015,8 +1052,10 @@ export type VirtualModelMaterializationConfig = {
 export type VirtualModelFusionVisionConfig = {
   apiKey?: string;
   baseUrl?: string;
+  fallbackModels?: string[];
   model?: string;
   modelSelector?: string;
+  retryCount?: number;
   timeoutMs?: number;
   toolName?: string;
 };
@@ -1041,11 +1080,15 @@ export type VirtualModelFusionWebSearchConfig = {
 
 export type VirtualModelFusionMediaConfig = {
   imageEditToolName?: string;
+  imageFallbackModelSelectors?: string[];
   imageGenerateToolName?: string;
   imageModelSelector?: string;
+  imageRetryCount?: number;
   jobCancelToolName?: string;
   jobGetToolName?: string;
+  videoFallbackModelSelectors?: string[];
   videoModelSelector?: string;
+  videoRetryCount?: number;
   videoStartToolName?: string;
 };
 
@@ -2467,7 +2510,37 @@ export type AgentObservabilityErrorRow = {
   userAgent?: string;
 };
 
+export type AgentAnalysisConversationRole = "assistant" | "context" | "developer" | "system" | "tool" | "user";
+
+export type AgentAnalysisConversationMessage = {
+  content: string;
+  sourcePreview: boolean;
+  sourceTruncated: boolean;
+  truncated: boolean;
+};
+
+export type AgentAnalysisConversationItem = AgentAnalysisConversationMessage & {
+  id: string;
+  role: AgentAnalysisConversationRole;
+};
+
+export type AgentAnalysisConversationTurn = {
+  agent: AgentKind;
+  assistant?: AgentAnalysisConversationMessage;
+  createdAt: string;
+  durationMs: number;
+  id: number;
+  messages?: AgentAnalysisConversationItem[];
+  model: string;
+  provider: string;
+  requestId: string;
+  sessionId: string;
+  statusCode: number;
+  user?: AgentAnalysisConversationMessage;
+};
+
 export type AgentAnalysisSessionDetail = {
+  conversation: AgentAnalysisConversationTurn[];
   endpoints: AgentObservabilityEndpointRow[];
   errors: AgentObservabilityErrorRow[];
   models: AgentAnalysisSessionModelRow[];

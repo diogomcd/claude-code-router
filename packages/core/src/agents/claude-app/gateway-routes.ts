@@ -1,5 +1,6 @@
 import type { AppConfig } from "@ccr/core/contracts/app";
 import { availableGatewayModelIds, normalizeProfileScopeValue } from "@ccr/core/contracts/app";
+import { findModelCatalogEntry, findProviderModelCatalogEntry, type ModelCatalogEntry } from "@ccr/core/gateway/model-catalog";
 import { modelRegistryForConfig } from "@ccr/core/routing/model-registry";
 import { resolveUsageModelAttribution } from "@ccr/core/usage/model-attribution";
 
@@ -16,6 +17,7 @@ export type ClaudeAppGatewayModelRoute = {
 };
 
 export type ClaudeAppGatewayModelRouteOptions = {
+  defaultTargetModel?: string;
   displayName?: (model: string) => string | undefined;
   supportsOneMillionContext?: (model: string) => boolean;
 };
@@ -27,21 +29,26 @@ export type ClaudeAppGatewayInferenceModel = {
 };
 
 export function inferClaudeAppGatewayTargetModel(
-  config: Pick<AppConfig, "Providers" | "profile" | "virtualModelProfiles">
+  config: Pick<AppConfig, "Providers" | "profile" | "virtualModelProfiles">,
+  options: Pick<ClaudeAppGatewayModelRouteOptions, "defaultTargetModel"> = {}
 ): string | undefined {
+  const defaultModel = options.defaultTargetModel?.trim();
+  const resolvedDefaultModel = defaultModel
+    ? canonicalClaudeAppGatewayTargetModel(defaultModel, config)
+    : undefined;
   const profileModel = inferGlobalClaudeProfileModel(config);
   const resolvedProfileModel = profileModel
     ? canonicalClaudeAppGatewayTargetModel(profileModel, config)
     : undefined;
-  return resolvedProfileModel ?? availableGatewayModelIds(config)[0];
+  return resolvedDefaultModel ?? resolvedProfileModel ?? availableGatewayModelIds(config)[0];
 }
 
 export function buildClaudeAppGatewayModelRoutes(
   config: Pick<AppConfig, "Providers" | "profile" | "virtualModelProfiles">,
   options: ClaudeAppGatewayModelRouteOptions = {}
 ): ClaudeAppGatewayModelRoute[] {
-  const targetModels = claudeAppGatewayTargetModels(config);
-  const displayNames = claudeAppGatewayDisplayNames(targetModels, options);
+  const targetModels = claudeAppGatewayTargetModels(config, options);
+  const displayNames = claudeAppGatewayDisplayNames(targetModels, config, options);
   const configuredTargetKeys = new Set(targetModels.map((model) =>
     stripClaudeAppGatewayOneMillionContextSuffix(model).toLowerCase()
   ));
@@ -85,7 +92,7 @@ export function resolveClaudeAppGatewayRouteModel(
   const normalized = model.trim().toLowerCase();
   const decodedRouteModel = decodeClaudeAppGatewayRouteId(normalized);
   if (decodedRouteModel) {
-    const decodedTarget = claudeAppGatewayTargetModels(config).find((targetModel) =>
+    const decodedTarget = claudeAppGatewayTargetModels(config, options).find((targetModel) =>
       stripClaudeAppGatewayOneMillionContextSuffix(targetModel).toLowerCase() === decodedRouteModel.toLowerCase()
     );
     if (decodedTarget) {
@@ -132,8 +139,11 @@ function inferGlobalClaudeProfileModel(config: Pick<AppConfig, "profile">): stri
   )?.model.trim() ?? "";
 }
 
-function claudeAppGatewayTargetModels(config: Pick<AppConfig, "Providers" | "profile" | "virtualModelProfiles">): string[] {
-  const defaultTargetModel = inferClaudeAppGatewayTargetModel(config);
+function claudeAppGatewayTargetModels(
+  config: Pick<AppConfig, "Providers" | "profile" | "virtualModelProfiles">,
+  options: Pick<ClaudeAppGatewayModelRouteOptions, "defaultTargetModel"> = {}
+): string[] {
+  const defaultTargetModel = inferClaudeAppGatewayTargetModel(config, options);
 
   return uniqueStrings([
     ...(defaultTargetModel ? [defaultTargetModel] : []),
@@ -169,11 +179,24 @@ function claudeAppGatewaySupportsOneMillionContext(
   if (providerOverride !== undefined) {
     return providerOverride;
   }
+  const catalogEntry = claudeAppGatewayCatalogEntry(baseModel, config);
   const physicalSelector = claudeAppGatewayPhysicalModelSelector(baseModel, config);
   return Boolean(
+    catalogEntry?.limits?.supports1MContext ||
     options.supportsOneMillionContext?.(physicalSelector ?? baseModel) ||
     (physicalSelector && physicalSelector !== baseModel && options.supportsOneMillionContext?.(baseModel))
   );
+}
+
+function claudeAppGatewayCatalogEntry(
+  model: string,
+  config: Pick<AppConfig, "Providers" | "virtualModelProfiles">
+): ModelCatalogEntry | undefined {
+  const resolved = claudeAppGatewayResolvedProviderModel(model, config);
+  if (!resolved) {
+    return findModelCatalogEntry(model);
+  }
+  return findProviderModelCatalogEntry(resolved.provider, resolved.model, [model]);
 }
 
 function claudeAppGatewayProviderSupportsOneMillionContext(
@@ -339,13 +362,15 @@ function claudeAppGatewayRouteMatchIds(route: ClaudeAppGatewayModelRoute): strin
 
 function claudeAppGatewayDisplayNames(
   models: string[],
+  config: Pick<AppConfig, "Providers" | "virtualModelProfiles">,
   options: ClaudeAppGatewayModelRouteOptions
 ): string[] {
   const baseNames = models.map((model) => {
     const targetModel = stripClaudeAppGatewayOneMillionContextSuffix(model);
+    const catalogDisplayName = claudeAppGatewayProviderCatalogDisplayName(targetModel, config);
     return claudeAppGatewayDisplayNameWithProvider(
       targetModel,
-      options.displayName?.(targetModel) ?? claudeAppGatewayBaseDisplayName(targetModel)
+      options.displayName?.(targetModel) ?? catalogDisplayName ?? claudeAppGatewayBaseDisplayName(targetModel)
     );
   });
   const counts = new Map<string, number>();
@@ -364,6 +389,17 @@ function claudeAppGatewayDisplayNames(
     duplicateIndexes.set(key, duplicateIndex);
     return `${baseName} #${duplicateIndex}`;
   });
+}
+
+function claudeAppGatewayProviderCatalogDisplayName(
+  model: string,
+  config: Pick<AppConfig, "Providers" | "virtualModelProfiles">
+): string | undefined {
+  const resolved = modelRegistryForConfig(config).resolve(model);
+  if (resolved?.kind !== "provider") {
+    return undefined;
+  }
+  return findProviderModelCatalogEntry(resolved.provider, resolved.model, [model])?.displayName;
 }
 
 function claudeAppGatewayBaseDisplayName(model: string): string {

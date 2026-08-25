@@ -24,6 +24,8 @@ import type { ApiKeyLimitUsage, ProviderCredentialRoutingTarget, UpstreamAttempt
 import type { RouteTraceObserver } from "@ccr/core/observability/route-trace";
 
 const providerCredentialSpilloverThreshold = 0.8;
+const openRouterDiscountModelHeader = "x-ccr-openrouter-discount-model";
+const openRouterDiscountProviderHeader = "x-ccr-openrouter-discount-provider-id";
 
 
 export function applyProviderCapabilityRouting(input: {
@@ -355,7 +357,10 @@ export async function fetchUpstreamWithFallback(input: {
     let cachedAttemptRouting = attemptRoutingCache.get(plannedAttempt.model);
     if (!cachedAttemptRouting) {
       const routedHeaders = { ...input.headers };
-      const sourceBody = buildAttemptBody(input.body, input.path, plannedAttempt.model);
+      const sourceBody = buildAttemptBody(input.body, input.path, plannedAttempt.model, {
+        discountModel: input.headers[openRouterDiscountModelHeader],
+        discountProvider: input.headers[openRouterDiscountProviderHeader]
+      });
       const routing = applyProviderCapabilityRouting({
         body: sourceBody,
         config: input.config,
@@ -610,12 +615,19 @@ function prepareUpstreamCredentialAttempt(input: {
   const credentials = activeProviderCredentials(target.provider);
   if (credentials.length === 0) {
     const preserveModelSelector = shouldPreserveCapabilityModelSelector(input.attempt.body, target);
+    const targetHeaders = targetProviderFallbackHeaders(attemptHeaders, target.provider, target.protocol);
+    const targetBody = target.body ?? normalizedBody?.body ?? input.attempt.body;
+    const providerQualifiedTargetBody = providerQualifiedTargetModelBody(
+      targetBody,
+      target.model,
+      targetHeaders["x-target-provider"]
+    );
     return {
       ...input.attempt,
-      body: attemptBody(preserveModelSelector ? input.attempt.body : target.body ?? normalizedBody?.body ?? input.attempt.body),
+      body: attemptBody(preserveModelSelector ? input.attempt.body : providerQualifiedTargetBody ?? targetBody),
       headers: preserveModelSelector
         ? clearTargetProviderHeaders(attemptHeaders)
-        : targetProviderFallbackHeaders(attemptHeaders, target.provider, target.protocol)
+        : targetHeaders
     };
   }
 
@@ -729,6 +741,22 @@ function shouldPreserveCapabilityModelSelector(body: Buffer | undefined, target:
     return false;
   }
   return Boolean(parseProviderModelSelector(stringValue(parseJsonObjectSafe(body)?.model)));
+}
+
+
+function providerQualifiedTargetModelBody(
+  body: Buffer | undefined,
+  model: string | undefined,
+  providerSelector: string | undefined
+): Buffer | undefined {
+  if (!model || !providerSelector || !parseProviderModelSelector(model)) {
+    return undefined;
+  }
+  const parsedBody = parseJsonObjectSafe(body);
+  if (!parsedBody) {
+    return undefined;
+  }
+  return serializeJsonBodyWithModel(parsedBody, `${providerSelector}/${model}`);
 }
 
 
@@ -1050,7 +1078,11 @@ function buildUpstreamAttempts(
 function buildAttemptBody(
   body: Buffer | undefined,
   path: string,
-  model: string | undefined
+  model: string | undefined,
+  options: {
+    discountModel?: string;
+    discountProvider?: string;
+  } = {}
 ): Buffer | undefined {
   if (!body || !model || requestProtocolForPath(path) === "gemini_generate_content") {
     return body;
@@ -1059,7 +1091,52 @@ function buildAttemptBody(
   if (!parsedBody || stringValue(parsedBody.model) === model) {
     return body;
   }
+  if (shouldRemoveOpenRouterDiscountProvider(parsedBody, model, options)) {
+    const { provider: _provider, ...rest } = parsedBody;
+    return serializeJsonBody({ ...rest, model });
+  }
   return serializeJsonBodyWithModel(parsedBody, model);
+}
+
+function shouldRemoveOpenRouterDiscountProvider(
+  body: Record<string, unknown>,
+  model: string,
+  options: {
+    discountModel?: string;
+    discountProvider?: string;
+  }
+): boolean {
+  if (!options.discountModel || !isRecord(body.provider)) {
+    return false;
+  }
+  return !selectorMatchesOpenRouterDiscountTarget(model, options.discountModel, options.discountProvider);
+}
+
+function selectorMatchesOpenRouterDiscountTarget(
+  model: string,
+  discountModel: string,
+  discountProvider: string | undefined
+): boolean {
+  const normalizedModel = normalizeRouteSelector(model)?.toLowerCase() ?? "";
+  const normalizedDiscountModel = normalizeRouteSelector(discountModel)?.toLowerCase() ?? "";
+  if (!normalizedModel || !normalizedDiscountModel) {
+    return false;
+  }
+  if (normalizedModel === normalizedDiscountModel) {
+    return true;
+  }
+  if (!normalizedModel.endsWith(`/${normalizedDiscountModel}`)) {
+    return false;
+  }
+  const providerPrefix = normalizedModel.slice(0, normalizedModel.length - normalizedDiscountModel.length - 1);
+  const providerKey = normalizeProviderHint(discountProvider);
+  const normalizedProviderPrefix = normalizeProviderHint(providerPrefix);
+  return normalizedProviderPrefix.includes("openrouter") ||
+    Boolean(providerKey && normalizedProviderPrefix.includes(providerKey));
+}
+
+function normalizeProviderHint(value: unknown): string {
+  return (stringValue(value) ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 

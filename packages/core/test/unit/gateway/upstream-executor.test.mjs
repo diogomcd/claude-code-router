@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { buildClaudeAppGatewayModelRoutes } from "@ccr/core/agents/claude-app/gateway-routes.ts";
+import { prepareClaudeAppDiscoveredModelRequest } from "@ccr/core/gateway/features/model-discovery.ts";
 import { fetchUpstreamWithFallback, prepareGatewayUpstreamAttemptForTest } from "@ccr/core/gateway/upstream/executor.ts";
 import { RequestRouteTraceRecorder } from "@ccr/core/observability/route-trace.ts";
 
@@ -66,6 +68,68 @@ test("retry backoff stops after client aborts a network error", async () => {
   });
 });
 
+test("OpenRouter discount provider constraints are removed from different fallback model attempts", async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies = [];
+  try {
+    globalThis.fetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return new Response("{}", {
+        headers: { "content-type": "application/json" },
+        status: bodies.length === 1 ? 503 : 200
+      });
+    };
+
+    const result = await fetchUpstreamWithFallback({
+      body: Buffer.from(JSON.stringify({
+        messages: [],
+        model: "OpenRouter/z-ai/glm-primary",
+        provider: {
+          ignore: ["legacy"],
+          order: ["cheap"]
+        }
+      })),
+      config: {
+        Providers: [],
+        Router: {
+          fallback: {
+            mode: "model-chain",
+            models: ["OpenRouter/z-ai/glm-fallback"],
+            retryCount: 0
+          },
+          rules: []
+        },
+        virtualModelProfiles: []
+      },
+      coreAuthToken: "core-token",
+      fallback: {
+        mode: "model-chain",
+        models: ["OpenRouter/z-ai/glm-fallback"],
+        retryCount: 0
+      },
+      headers: {
+        "x-ccr-openrouter-discount-model": "z-ai/glm-primary",
+        "x-ccr-openrouter-discount-provider-id": "openrouter"
+      },
+      method: "POST",
+      path: "/v1/chat/completions",
+      routedModel: "OpenRouter/z-ai/glm-primary",
+      upstreamUrl: "http://127.0.0.1:3456/v1/chat/completions"
+    });
+
+    assert.equal(result.response.status, 200);
+    assert.equal(result.failedAttempts.length, 1);
+    assert.deepEqual(bodies[0].provider, {
+      ignore: ["legacy"],
+      order: ["cheap"]
+    });
+    assert.equal(bodies[1].model, "OpenRouter/z-ai/glm-fallback");
+    assert.equal(bodies[1].provider, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("target-provider routing preserves slash-namespaced model ids", () => {
   const cases = [
     {
@@ -116,6 +180,63 @@ test("target-provider routing preserves slash-namespaced model ids", () => {
   }
 });
 
+test("Claude App OpenRouter routes do not send conflicting vendor-prefixed model selectors to the core gateway", () => {
+  const targetModel = "OpenRouter/google/gemini-3.7-flash";
+  const config = {
+    Providers: [
+      {
+        apiKey: "openrouter-key",
+        capabilities: [
+          { baseUrl: "https://openrouter.ai/api/v1", type: "openai_chat_completions" },
+          { baseUrl: "https://openrouter.ai/api/v1", type: "openai_responses" }
+        ],
+        id: "openrouter",
+        models: ["google/gemini-3.7-flash"],
+        name: "OpenRouter"
+      }
+    ],
+    Router: { fallback: { mode: "off", models: [], retryCount: 0 }, rules: [] },
+    profile: {
+      enabled: true,
+      profiles: [
+        {
+          agent: "claude-code",
+          enabled: true,
+          id: "claude-code-openrouter",
+          model: targetModel,
+          name: "Claude Code OpenRouter",
+          scope: "global"
+        }
+      ]
+    },
+    virtualModelProfiles: []
+  };
+  const route = buildClaudeAppGatewayModelRoutes(config).find((item) => item.targetModel === targetModel);
+  assert.ok(route);
+
+  const rewrite = prepareClaudeAppDiscoveredModelRequest(
+    config,
+    "POST",
+    "/v1/messages",
+    Buffer.from(JSON.stringify({ max_tokens: 8, messages: [{ role: "user", content: "hello" }], model: route.id }))
+  );
+  assert.equal(rewrite?.routedModel, targetModel);
+
+  const rewrittenBody = JSON.parse(rewrite.body.toString("utf8"));
+  const attempt = prepareGatewayUpstreamAttemptForTest({
+    body: rewrittenBody,
+    config,
+    headers: {},
+    method: "POST",
+    path: "/v1/messages",
+    routedModel: rewrite.routedModel
+  });
+
+  assert.equal(attempt.headers["x-target-provider"], "openrouter::openai_chat_completions");
+  assert.equal(coreGatewayTargetProviderConflict(attempt), false);
+  assert.equal(attempt.body.model, "openrouter::openai_chat_completions/google/gemini-3.7-flash");
+});
+
 test("target-provider routing keeps vendor-prefixed model ids even when the prefix names another provider", () => {
   const config = {
     Providers: [
@@ -155,6 +276,52 @@ test("target-provider routing keeps vendor-prefixed model ids even when the pref
   assert.equal(attempt.body.model, "openai/gpt-oss-20b");
   assert.equal(attempt.logicalProvider, "Groq");
 });
+
+function coreGatewayTargetProviderConflict(attempt) {
+  const bodyModel = typeof attempt.body?.model === "string" ? attempt.body.model : "";
+  const targetProvider = attempt.headers?.["x-target-provider"];
+  if (!bodyModel || !targetProvider) {
+    return false;
+  }
+  const slashIndex = bodyModel.indexOf("/");
+  if (slashIndex <= 0 || slashIndex >= bodyModel.length - 1) {
+    return false;
+  }
+  const providerHint = bodyModel.slice(0, slashIndex);
+  if (providerHint === targetProvider) {
+    return false;
+  }
+  const modelProvider = coreGatewayBuiltinProvider(providerHint);
+  const targetProviderType = coreGatewayProviderType(targetProvider);
+  return Boolean(modelProvider && targetProviderType && modelProvider !== targetProviderType);
+}
+
+function coreGatewayProviderType(providerSelector) {
+  if (providerSelector.includes("::openai_chat_completions") || providerSelector.includes("::openai_responses")) {
+    return "openai";
+  }
+  if (providerSelector.includes("::anthropic_messages")) {
+    return "anthropic";
+  }
+  if (providerSelector.includes("::gemini_generate_content") || providerSelector.includes("::gemini_interactions")) {
+    return "gemini";
+  }
+  return coreGatewayBuiltinProvider(providerSelector);
+}
+
+function coreGatewayBuiltinProvider(value) {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "openai") {
+    return "openai";
+  }
+  if (normalized === "anthropic" || normalized === "claude") {
+    return "anthropic";
+  }
+  if (normalized === "gemini" || normalized === "google") {
+    return "gemini";
+  }
+  return undefined;
+}
 
 test("target-provider routing preserves slash model ids for providers without explicit capabilities", () => {
   const config = {

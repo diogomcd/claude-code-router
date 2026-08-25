@@ -13,6 +13,7 @@ import {
   shouldServeClaudeCliBootstrapResponse,
   shouldServeGatewayModelsResponse
 } from "@ccr/core/gateway/features/model-discovery.ts";
+import { profileApiKeyId } from "@ccr/core/profiles/api-key.ts";
 import { ModelRegistry } from "@ccr/core/routing/model-registry.ts";
 
 function createConfig({ profileModel, providers = [], virtualModelProfiles = [] } = {}) {
@@ -138,6 +139,47 @@ test("issue 1535 Claude App discovery canonicalizes a uniquely configured bare p
   assert.equal(inferClaudeAppGatewayTargetModel(config), "Provider-2/claude-sonnet-4-5");
   assert.equal(routes[0].targetModel, "Provider-2/claude-sonnet-4-5");
   assertPublishedRoutesResolveUniquely(config);
+});
+
+test("Claude App discovery prioritizes the authenticated profile default model", () => {
+  const config = createConfig({
+    providers: [
+      { models: ["gpt-4.1"], name: "Provider-1" },
+      { models: ["claude-sonnet-4-5"], name: "Provider-2" }
+    ]
+  });
+  const profile = {
+    agent: "claude-code",
+    enabled: true,
+    id: "claude-code-work",
+    model: "claude-sonnet-4-5",
+    name: "Work",
+    scope: "ccr"
+  };
+  config.profile.profiles = [profile];
+  const apiKey = {
+    createdAt: "2026-01-01T00:00:00.000Z",
+    id: profileApiKeyId(profile),
+    key: "profile-key",
+    name: "Profile: Work"
+  };
+  const routes = buildClaudeAppGatewayModelRoutes(config, {
+    defaultTargetModel: profile.model
+  });
+  const response = createGatewayModelsResponse(config, { "user-agent": "claude-app/1.0" }, apiKey);
+
+  assert.equal(inferClaudeAppGatewayTargetModel(config, { defaultTargetModel: profile.model }), "Provider-2/claude-sonnet-4-5");
+  assert.equal(routes[0].targetModel, "Provider-2/claude-sonnet-4-5");
+  assert.equal(response.first_id, routes[0].id);
+
+  const rewritten = prepareClaudeAppDiscoveredModelRequest(
+    config,
+    "POST",
+    "/v1/messages",
+    Buffer.from(JSON.stringify({ messages: [], model: response.first_id })),
+    { profile }
+  );
+  assert.equal(rewritten?.routedModel, "Provider-2/claude-sonnet-4-5");
 });
 
 test("issue 1535 duplicate provider model names keep distinct deterministic Claude App routes", () => {
@@ -316,12 +358,12 @@ test("Claude CLI bootstrap returns catalog-derived model configuration from mode
   assert.equal(option.model, `${route.id}[1m]`);
   assert.equal(option.display_name, "Zhipu AI (China) - Coding Plan/GLM-5.2 (1M context)");
   assert.equal(option.max_input_tokens, 1_049_000);
-  assert.equal(option.max_tokens, 1_048_560);
+  assert.equal(option.max_tokens, 1_048_576);
   assert.equal(option.capabilities.context_window.max_input_tokens, 1_049_000);
   assert.equal(option.capabilities.context_management.max_input_tokens, 1_049_000);
   assert.equal(option.capabilities.context_window.supports_1m_context, true);
   assert.equal(option.capabilities.context_window.one_million_context_variant, true);
-  assert.equal(option.capabilities.image_input.supported, false);
+  assert.equal(option.capabilities.image_input.supported, true);
   assert.equal(option.capabilities.structured_outputs.supported, true);
   assert.equal(option.capabilities.tool_use.supported, true);
   assert.equal(option.capabilities.thinking.supported, true);
@@ -382,6 +424,128 @@ test("issue 1632 Claude discovery inherits Fusion fixed model provider context",
     Buffer.from(JSON.stringify({ messages: [], model: codeModel.id }))
   );
   assert.equal(rewrite?.routedModel, "Fusion/glm-5.2-fusion");
+});
+
+test("Claude Code discovery marks Fusion vision aliases as image capable", () => {
+  const config = createConfig({
+    providers: [
+      {
+        modelMetadata: {
+          "base-model": {
+            capabilities: { imageInput: false },
+            contextWindow: 128000
+          }
+        },
+        models: ["base-model"],
+        name: "Text",
+        type: "openai_chat_completions"
+      }
+    ],
+    virtualModelProfiles: [
+      {
+        baseModel: { fixedModel: "Text/base-model", mode: "fixed" },
+        displayName: "Vision Fusion",
+        enabled: true,
+        execution: {
+          clientToolsPolicy: "allow",
+          matchMultimodal: true,
+          mode: "tool_loop",
+          streamMode: "optimistic"
+        },
+        id: "vision-fusion",
+        key: "vision",
+        match: { exactAliases: ["vision"], prefixes: [], suffixes: [] },
+        materialization: { enabled: true, includeInGatewayModels: true },
+        metadata: {
+          fusionVision: { modelSelector: "Vision/vision-model", toolName: "vision_understand_vision" }
+        },
+        tools: [{ name: "vision_understand_vision", visibility: "internal" }]
+      }
+    ]
+  });
+
+  const response = createClaudeCodeModelsResponse(config);
+  const baseModel = response.data.find((item) => item.display_name === "Text/base-model");
+  const fusionModel = response.data.find((item) => item.display_name === "Fusion/vision");
+  const bootstrap = createClaudeCliBootstrapResponse(config);
+  const fusionOption = bootstrap.additional_model_options.find((item) => item.display_name === "Fusion/vision");
+
+  assert.ok(baseModel);
+  assert.equal(baseModel.capabilities.image_input.supported, false);
+  assert.ok(fusionModel);
+  assert.equal(fusionModel.capabilities.image_input.supported, true);
+  assert.ok(fusionOption);
+  assert.equal(fusionOption.capabilities.image_input.supported, true);
+});
+
+test("Claude Code discovery only marks valid prefixed and suffixed Fusion vision models as image capable", () => {
+  const config = createConfig({
+    providers: [
+      {
+        modelMetadata: {
+          "fast-model": {
+            capabilities: { imageInput: false },
+            contextWindow: 128000
+          },
+          "model-fast": {
+            capabilities: { imageInput: false },
+            contextWindow: 128000
+          }
+        },
+        models: ["fast-model", "model-fast"],
+        name: "Text",
+        type: "openai_chat_completions"
+      }
+    ],
+    virtualModelProfiles: [
+      {
+        baseModel: { mode: "strip_prefix" },
+        displayName: "Vision Prefix",
+        enabled: true,
+        execution: {
+          clientToolsPolicy: "allow",
+          matchMultimodal: true,
+          mode: "tool_loop",
+          streamMode: "optimistic"
+        },
+        id: "vision-prefix",
+        key: "vision-prefix",
+        match: { exactAliases: [], prefixes: ["fast-"], suffixes: [] },
+        materialization: { enabled: true, includeInGatewayModels: true },
+        metadata: {
+          fusionVision: { modelSelector: "Vision/vision-model", toolName: "vision_understand_prefix" }
+        },
+        tools: [{ name: "vision_understand_prefix", visibility: "internal" }]
+      },
+      {
+        baseModel: { mode: "strip_suffix" },
+        displayName: "Vision Suffix",
+        enabled: true,
+        execution: {
+          clientToolsPolicy: "allow",
+          matchMultimodal: true,
+          mode: "tool_loop",
+          streamMode: "optimistic"
+        },
+        id: "vision-suffix",
+        key: "vision-suffix",
+        match: { exactAliases: [], prefixes: [], suffixes: ["-fast"] },
+        materialization: { enabled: true, includeInGatewayModels: true },
+        metadata: {
+          fusionVision: { modelSelector: "Vision/vision-model", toolName: "vision_understand_suffix" }
+        },
+        tools: [{ name: "vision_understand_suffix", visibility: "internal" }]
+      }
+    ]
+  });
+
+  const response = createClaudeCodeModelsResponse(config);
+  const byDisplayName = new Map(response.data.map((item) => [item.display_name, item]));
+
+  assert.equal(byDisplayName.get("Text/fast-model")?.capabilities.image_input.supported, false);
+  assert.equal(byDisplayName.get("Text/model-fast")?.capabilities.image_input.supported, false);
+  assert.equal(byDisplayName.get("Text/fast-fast-model")?.capabilities.image_input.supported, true);
+  assert.equal(byDisplayName.get("Text/model-fast-fast")?.capabilities.image_input.supported, true);
 });
 
 test("Claude App discovery publishes the effective provider context for uncatalogued models", () => {

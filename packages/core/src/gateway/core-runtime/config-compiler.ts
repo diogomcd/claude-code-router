@@ -8,7 +8,7 @@ import { grokAccessTokenExpired, grokClientVersion } from "@ccr/core/agents/loca
 import { pluginService } from "@ccr/core/plugins/service";
 import { normalizeRouteSelector, providerRuntimeId } from "@ccr/core/routing/model-registry";
 import { isRecord, stringListValue, stringValue } from "@ccr/core/gateway/internal/value";
-import { fusionBuiltinToolArtifacts, fusionToolFallbackMcpServer, normalizeFusionWebSearchProfileToolName, toolHubMcpServer, withCodexCompatibleVirtualModelProfiles, withFusionVirtualModelAliases, withFusionWebSearchToolInstructions } from "@ccr/core/mcp/fusion-config";
+import { fusionBuiltinToolArtifacts, fusionToolFallbackMcpServer, normalizeFusionWebSearchProfileToolName, toolHubMcpServer, withCodexCompatibleVirtualModelProfiles, withFusionVirtualModelAliases, withFusionVisionToolInstructions, withFusionWebSearchToolInstructions } from "@ccr/core/mcp/fusion-config";
 import { mediaToolsMcpServer } from "@ccr/core/mcp/grok-media-config";
 import { resolveGatewayPublicModelId } from "@ccr/core/gateway/features/model-discovery";
 import { activeProviderCredentials, inferProtocol, normalizedProviderCapabilities, normalizeProviderProtocol, providerCapabilityForClientProtocol, providerCapabilityInternalName, providerCapabilityNameMatches, providerCredentialInternalName, providerProtocolForClientProtocol, sortProviderCredentialsForConfig, toCoreGatewayProviders } from "@ccr/core/providers/runtime-topology";
@@ -377,15 +377,28 @@ function normalizeCoreGatewayVirtualModelProfile(profile: unknown, config: AppCo
   const rewrittenVisionSelector = fusionVision && !visionBaseUrl && visionSelector
     ? rewriteModelSelectorForCoreGatewayProfile(visionSelector, config, "openai_chat_completions")
     : undefined;
+  const visionFallbackModels = stringListValue(fusionVision?.fallbackModels);
+  const rewrittenVisionFallbackModels = fusionVision && !visionBaseUrl
+    ? uniqueStrings(visionFallbackModels.map((model) => rewriteModelSelectorForCoreGatewayProfile(model, config, "openai_chat_completions")))
+    : visionFallbackModels;
+  const visionFallbackModelsChanged = !stringArraysEqual(rewrittenVisionFallbackModels, visionFallbackModels);
 
-  if (metadata && fusionVision && visionSelectorField && rewrittenVisionSelector && rewrittenVisionSelector !== visionSelector) {
+  if (
+    metadata &&
+    fusionVision &&
+    (
+      (visionSelectorField && rewrittenVisionSelector && rewrittenVisionSelector !== visionSelector) ||
+      visionFallbackModelsChanged
+    )
+  ) {
     nextProfile = {
       ...sourceProfile,
       metadata: {
         ...metadata,
         fusionVision: {
           ...fusionVision,
-          [visionSelectorField]: rewrittenVisionSelector
+          ...(visionSelectorField && rewrittenVisionSelector ? { [visionSelectorField]: rewrittenVisionSelector } : {}),
+          ...(visionFallbackModelsChanged ? { fallbackModels: rewrittenVisionFallbackModels } : {})
         }
       }
     };
@@ -407,7 +420,8 @@ function normalizeCoreGatewayVirtualModelProfile(profile: unknown, config: AppCo
         }
       };
   const profileAfterWebSearchToolName = normalizeFusionWebSearchProfileToolName(profileWithoutToolLoopLimits) ?? profileWithoutToolLoopLimits;
-  return withFusionWebSearchToolInstructions(profileAfterWebSearchToolName) ?? profileAfterWebSearchToolName;
+  const profileAfterWebSearchInstructions = withFusionWebSearchToolInstructions(profileAfterWebSearchToolName) ?? profileAfterWebSearchToolName;
+  return withFusionVisionToolInstructions(profileAfterWebSearchInstructions) ?? profileAfterWebSearchInstructions;
 }
 
 
@@ -451,6 +465,10 @@ function coreGatewayProviderSelectorName(
   }
 
   return capability ? providerCapabilityInternalName(provider, protocol) : providerRuntimeId(provider);
+}
+
+function stringArraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 
