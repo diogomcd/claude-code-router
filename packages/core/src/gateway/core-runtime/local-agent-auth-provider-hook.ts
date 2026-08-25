@@ -247,7 +247,7 @@ async function transformAntigravityRequest(input: ProviderPluginInput, plugin: R
   if (!project) {
     return { error: "Antigravity cloudaicompanionProject was not resolved from loadCodeAssist.", ok: false };
   }
-  const body = isRecord(input.upstreamRequest.body) ? input.upstreamRequest.body : {};
+  const body = isRecord(input.upstreamRequest.body) ? sanitizeAntigravityToolSchemas(input.upstreamRequest.body, model) : {};
   return {
     ok: true,
     value: {
@@ -333,6 +333,86 @@ function sanitizeGrokUnsupportedResponsesOptions(body: Record<string, unknown>):
     }
   }
   return next ? { value: next, changed: true } : { value: body, changed: false };
+}
+
+function sanitizeAntigravityToolSchemas(body: unknown, model: string): Record<string, unknown> {
+  if (!isRecord(body)) {
+    return {};
+  }
+  const claudeModel = /^claude/i.test(model);
+  const existingTools = body.tools;
+  if (!Array.isArray(existingTools)) {
+    return body;
+  }
+  let changed = false;
+  const tools = existingTools.map((tool: unknown) => {
+    if (!isRecord(tool)) {
+      return tool;
+    }
+    let next = tool;
+    if (isRecord(tool.input_schema) && claudeModel) {
+      const inputSchema = rewriteAnyOfToOneOf(tool.input_schema);
+      if (inputSchema !== tool.input_schema) {
+        next = { ...next, input_schema: inputSchema };
+      }
+    }
+    if (Array.isArray(tool.functionDeclarations) && claudeModel) {
+      const existingDeclarations = tool.functionDeclarations;
+      const declarations = existingDeclarations.map((declaration: unknown) => {
+        if (!isRecord(declaration) || !isRecord(declaration.parameters)) {
+          return declaration;
+        }
+        const parameters = rewriteAnyOfToOneOf(declaration.parameters);
+        if (parameters === declaration.parameters) {
+          return declaration;
+        }
+        return { ...declaration, parameters };
+      });
+      if (declarations.some((declaration: unknown, index: number) => declaration !== existingDeclarations[index])) {
+        next = { ...next, functionDeclarations: declarations };
+      }
+    }
+    if (next !== tool) {
+      changed = true;
+    }
+    return next;
+  });
+  if (!changed) {
+    return body;
+  }
+  return { ...body, tools };
+}
+
+function rewriteAnyOfToOneOf(node: unknown): unknown {
+  if (Array.isArray(node)) {
+    let changed = false;
+    const next = node.map((item) => {
+      const rewritten = rewriteAnyOfToOneOf(item);
+      if (rewritten !== item) {
+        changed = true;
+      }
+      return rewritten;
+    });
+    return changed ? next : node;
+  }
+  if (!isRecord(node)) {
+    return node;
+  }
+  let changed = false;
+  const next: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "anyOf" && Array.isArray(value)) {
+      next.oneOf = value.map((branch) => rewriteAnyOfToOneOf(branch));
+      changed = true;
+      continue;
+    }
+    const rewritten = rewriteAnyOfToOneOf(value);
+    if (rewritten !== value) {
+      changed = true;
+    }
+    next[key] = rewritten;
+  }
+  return changed ? next : node;
 }
 
 function sanitizeGrokResponsesTools(body: Record<string, unknown>): { value: Record<string, unknown>; changed: boolean } {

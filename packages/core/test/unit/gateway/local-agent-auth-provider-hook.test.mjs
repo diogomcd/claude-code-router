@@ -296,6 +296,117 @@ test("Antigravity local agent request hook wraps the public Gemini call into v1i
   assert.match(requestResult.value.headers["user-agent"], /^antigravity\/hub\//);
 });
 
+test("Antigravity local agent request hook rewrites anyOf to oneOf in tool schemas for Claude models", async () => {
+  const [hook] = createGatewayPlugin({
+    config: {
+      providerPlugins: [antigravityOauthProviderPlugin()]
+    }
+  }).providerHooks;
+
+  const requestResult = await hook.transformRequest({
+    upstreamRequest: {
+      body: {
+        contents: [],
+        tools: [
+          {
+            functionDeclarations: [
+              {
+                description: "probe",
+                name: "probe",
+                parameters: {
+                  additionalProperties: false,
+                  properties: {
+                    action: { type: "string" },
+                    contract: {
+                      anyOf: [
+                        { const: "latest", type: "string" },
+                        { pattern: "^(0|[1-9])$", type: "string" }
+                      ],
+                      description: "runtime version"
+                    },
+                    nested: {
+                      properties: {
+                        deep: { anyOf: [{ type: "number" }, { type: "string" }] }
+                      },
+                      type: "object"
+                    }
+                  },
+                  required: ["action"],
+                  type: "object"
+                }
+              },
+              {
+                description: "sem anyOf permanece intocado",
+                name: "clean",
+                parameters: { properties: { v: { type: "string" } }, type: "object" }
+              }
+            ]
+          }
+        ]
+      },
+      headers: { "content-type": "application/json" },
+      method: "POST",
+      url: "https://daily-cloudcode-pa.googleapis.com/v1beta/models/claude-opus-4-6-thinking:generateContent"
+    }
+  });
+
+  assert.equal(requestResult.ok, true);
+  const declarations = requestResult.value.body.request.tools[0].functionDeclarations;
+  const probeSchema = declarations[0].parameters;
+  assert.deepEqual(probeSchema.properties.contract.oneOf, [
+    { const: "latest", type: "string" },
+    { pattern: "^(0|[1-9])$", type: "string" }
+  ]);
+  assert.equal("anyOf" in probeSchema.properties.contract, false);
+  assert.deepEqual(
+    probeSchema.properties.nested.properties.deep.oneOf,
+    [{ type: "number" }, { type: "string" }]
+  );
+  assert.equal(
+    "anyOf" in declarations[1].parameters.properties.v === false && declarations[1].parameters.properties.v.type === "string",
+    true,
+    "declaração sem anyOf deve passar sem alteração"
+  );
+
+  const geminiUntouched = await hook.transformRequest({
+    upstreamRequest: {
+      body: {
+        contents: [],
+        tools: [
+          {
+            functionDeclarations: [
+              {
+                name: "probe",
+                parameters: { properties: { v: { anyOf: [{ type: "string" }] } }, type: "object" }
+              }
+            ]
+          }
+        ]
+      },
+      headers: { "content-type": "application/json" },
+      method: "POST",
+      url: "https://daily-cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent"
+    }
+  });
+  assert.equal(geminiUntouched.ok, true);
+  assert.deepEqual(
+    geminiUntouched.value.body.request.tools[0].functionDeclarations[0].parameters.properties.v.anyOf,
+    [{ type: "string" }],
+    "modelos gemini não claude devem manter anyOf"
+  );
+
+  const untouched = await hook.transformRequest({
+    upstreamRequest: {
+      body: { contents: [] },
+      headers: { "content-type": "application/json" },
+      method: "POST",
+      url: "https://daily-cloudcode-pa.googleapis.com/v1beta/models/claude-opus-4-6-thinking:generateContent"
+    }
+  });
+  assert.equal(untouched.ok, true);
+  assert.deepEqual(untouched.value.body.request, { contents: [] });
+});
+
 test("Antigravity local agent response hook unwraps only the internal response envelope", async () => {
   const [hook] = createGatewayPlugin({
     config: {
