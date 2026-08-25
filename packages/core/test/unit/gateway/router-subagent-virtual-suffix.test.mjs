@@ -82,7 +82,7 @@ test("issue 1693 subagent remap normalizes the [1m] virtual suffix on the profil
   assert.equal(result.body.model, "Provider/claude-fable-5");
   assert.doesNotMatch(result.body.model, /\[1m\]$/);
   assert.equal(result.decision.model, "Provider/claude-fable-5");
-  assert.equal(result.decision.reason, "builtin:claude-code");
+  assert.equal(result.decision.reason, "default");
 });
 
 test("issue 1693 subagent remap strips the suffix from a bare [1m] profile model", async () => {
@@ -95,7 +95,7 @@ test("issue 1693 subagent remap strips the suffix from a bare [1m] profile model
 
   assert.equal(result.body.model, "Provider/claude-fable-5");
   assert.doesNotMatch(result.body.model, /\[1m\]$/);
-  assert.equal(result.decision.reason, "builtin:claude-code");
+  assert.equal(result.decision.reason, "default");
 });
 
 test("issue 1693 subagent remap forwards a suffix-free wire model upstream", async () => {
@@ -150,7 +150,7 @@ test("issue 1693 subagent remap resolves a [1m] profile model against the bare p
 
   assert.equal(result.body.model, "Provider/claude-fable-5");
   assert.equal(result.decision.model, "Provider/claude-fable-5");
-  assert.equal(result.decision.reason, "builtin:claude-code");
+  assert.equal(result.decision.reason, "default");
 });
 
 test("issue 1693 parent-session client models keep the ingress [1m] normalization", async () => {
