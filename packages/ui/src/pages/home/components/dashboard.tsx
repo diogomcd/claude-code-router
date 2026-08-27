@@ -2783,10 +2783,12 @@ function ProviderAccountSummaryCard({
   const meterLimit = variant === "cards" && !compactBento
     ? Math.max(providerAccountMeterLimit(dimensions, false, variant), 1 + bentoSecondaryLimit)
     : providerAccountMeterLimit(dimensions, false, variant);
-  const meters = providerAccountMetersForDisplayOrdered(account, meterLimit);
+  const allDisplayMeters = providerAccountMetersForDisplayOrdered(account, account.meters.length);
+  const meters = allDisplayMeters.slice(0, meterLimit);
   const secondaryMeters = primaryMeter
-    ? meters.filter((meter) => meter !== primaryMeter).slice(0, bentoSecondaryLimit)
+    ? allDisplayMeters.filter((meter) => meter !== primaryMeter)
     : [];
+  const secondaryMetersOverflow = secondaryMeters.length > bentoSecondaryLimit;
   const primaryProgress = primaryMeter && isProviderAccountQuotaMeter(primaryMeter) ? providerAccountMeterProgress(primaryMeter) : undefined;
   const resizeHandle = editing && onChangeCardSize
     ? <ProviderAccountCardResizeHandle account={account} currentSize={providerAccountBentoSizeFromSpan(cardBentoSpan)} maxHeight={providerAccountBentoRowCount(dimensions) >= 2 ? 2 : 1} maxWidth={providerAccountBentoColumnCount(dimensions, 2) >= 2 ? 2 : 1} onResize={onChangeCardSize} />
@@ -2872,7 +2874,7 @@ function ProviderAccountSummaryCard({
             </div>
 
             {secondaryMeters.length > 0 ? (
-              <div className="mt-auto min-h-0 space-y-1.5 border-t border-border/45 pt-2">
+              <div className={cn("mt-auto min-h-0 space-y-1.5 border-t border-border/45 pt-2", secondaryMetersOverflow && "overflow-y-auto")}>
                 {secondaryMeters.map((meter) => (
                   <ProviderAccountMeterLine account={account} compact dimensions={dimensions} key={meter.id} meter={meter} onRefresh={onRefresh} />
                 ))}

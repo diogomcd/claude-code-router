@@ -131,9 +131,61 @@ test("replaces messages when Headroom compresses", async () => {
   }
 });
 
-test("skips providers listed in excludeProviders without calling Headroom", async () => {
-  let called = false;
+test("skips Claude Code user agent without calling Headroom", async () => {
   const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    throw new Error("should not be called");
+  };
+  try {
+    const config = configWith({ minTokens: 1 });
+    for (const userAgent of ["claude-cli/2.4.0 (external, cli)", "claude-vscode/1.2.3"]) {
+      const result = await prepareContextCompressionRequest({
+        body: requestBody(bigMessages()),
+        config,
+        headers: { "user-agent": userAgent },
+        method: "POST",
+        path: PATH
+      });
+      assert.equal(result, undefined);
+    }
+    assert.equal(called, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("compresses requests without a Claude user agent", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        compression_ratio: 0.5,
+        messages: [{ role: "user", content: "compressed" }],
+        tokens_saved: 50
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  try {
+    const result = await prepareContextCompressionRequest({
+      body: requestBody(bigMessages()),
+      config: configWith({ minTokens: 1 }),
+      headers: { "user-agent": "opencode/1.0.0" },
+      method: "POST",
+      path: PATH
+    });
+    assert.ok(result);
+    const body = JSON.parse(result.body.toString());
+    assert.deepEqual(body.messages, [{ role: "user", content: "compressed" }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("skips providers listed in excludeProviders without calling Headroom", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
   globalThis.fetch = async () => {
     called = true;
     throw new Error("should not be called");

@@ -403,6 +403,7 @@ export class GatewayRequestPipeline {
       const contextCompressionRequest = await prepareContextCompressionRequest({
         body: bodyToForward,
         config: this.config,
+        headers: request.headers,
         method,
         path,
         routedModel

@@ -9,9 +9,11 @@
  * proceeds uncompressed, so the gateway keeps working with Headroom off.
  */
 import type { AppConfig } from "@ccr/core/contracts/app";
+import { readHeader } from "@ccr/core/gateway/http/io";
 import { serializeJsonBody, takeJsonObject } from "@ccr/core/gateway/http/body";
 import { isRecord, stringValue } from "@ccr/core/gateway/internal/value";
 import { ModelRegistry } from "@ccr/core/routing/model-registry";
+import type { IncomingHttpHeaders } from "node:http";
 
 export type ContextCompressionPreparation = {
   body: Buffer;
@@ -36,6 +38,7 @@ type HeadroomCompressResponse = {
 export async function prepareContextCompressionRequest(input: {
   body?: Buffer;
   config: AppConfig;
+  headers?: IncomingHttpHeaders;
   method: string;
   path: string;
   routedModel?: string;
@@ -45,6 +48,11 @@ export async function prepareContextCompressionRequest(input: {
     return undefined;
   }
   if ((input.method || "GET").toUpperCase() !== "POST" || !COMPRESSIBLE_PATH_PATTERN.test(input.path)) {
+    return undefined;
+  }
+  // Claude Code rewrites its own history every turn; compressing it busts the
+  // upstream prompt cache and costs more than the savings.
+  if (isClaudeCodeUserAgent(input.headers)) {
     return undefined;
   }
   if (!input.body || input.body.length === 0) {
@@ -108,6 +116,14 @@ function readContextCompressionSettings(config: AppConfig): { baseUrl: string; e
     minTokens: numberValue(pluginConfig.minTokens) ?? DEFAULT_MIN_TOKENS,
     timeoutMs: numberValue(pluginConfig.timeoutMs) ?? DEFAULT_TIMEOUT_MS
   };
+}
+
+function isClaudeCodeUserAgent(headers: IncomingHttpHeaders | undefined): boolean {
+  const userAgent = readHeader(headers?.["user-agent"]);
+  if (!userAgent) {
+    return false;
+  }
+  return userAgent.toLowerCase().includes("claude");
 }
 
 function normalizeProviderNames(value: unknown): string[] {
