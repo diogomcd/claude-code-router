@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -36,6 +37,14 @@ const secondsToMillisecondsThreshold = 1e12;
 const antigravityKeyringService = "gemini";
 const antigravityKeyringUsername = "antigravity";
 const antigravityKeyringTimeoutMs = 5_000;
+
+// Client OAuth do Gemini CLI, que o Antigravity reaproveita no login Google;
+// é o client que emitiu os refresh_token gravados em ~/.gemini.
+const antigravityOauthClientId = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
+const antigravityOauthClientSecret = "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";
+const antigravityOauthTokenEndpoint = "https://oauth2.googleapis.com/token";
+const antigravityRefreshTimeoutMs = 15_000;
+const antigravityRefreshFailureBackoffMs = 60_000;
 
 const antigravityFallbackModels = ["gemini-3.1-pro-low", "gemini-3.6-flash-high", "claude-sonnet-4-6"];
 const antigravityCandidateId = "antigravity-ide";
@@ -297,6 +306,7 @@ export interface AntigravityTokenSet {
   accessToken: string;
   expiryDate?: number;
   idToken?: string;
+  refreshToken?: string;
   scope?: string;
   sourceFile: string;
 }
@@ -332,6 +342,7 @@ export function readAntigravityAuth(sourceFile?: string): AntigravityTokenSet | 
     accessToken,
     expiryDate: normalizeExpiryDate(record.expiry_date ?? record.expiryDate),
     idToken: readString(record.id_token) || readString(record.idToken),
+    refreshToken: readString(record.refresh_token) || readString(record.refreshToken),
     scope: readString(record.scope),
     sourceFile: file
   };
@@ -391,7 +402,145 @@ export async function resolveAntigravityAuth(
   reference?: { sourceFile?: string }
 ): Promise<AntigravityTokenSet | undefined> {
   const auth = liveAntigravityAuth(reference?.sourceFile);
-  return auth?.accessToken && !antigravityAccessTokenExpired(auth) ? auth : undefined;
+  if (auth?.accessToken && !antigravityAccessTokenExpired(auth)) {
+    return auth;
+  }
+  return refreshAntigravityAuth(auth);
+}
+
+type AntigravityRefreshOutcome = {
+  auth?: AntigravityTokenSet;
+  failureBackoffUntil?: number;
+};
+
+// Refreshes em andamento por refresh_token, para requisições concorrentes
+// compartilharem a mesma chamada em vez de dispararem um refresh cada.
+const antigravityRefreshInFlight = new Map<string, Promise<AntigravityRefreshOutcome>>();
+const antigravityRefreshFailures = new Map<string, number>();
+
+function refreshTokenKey(auth: AntigravityTokenSet): string {
+  const configuredFile = process.env.CCR_ANTIGRAVITY_OAUTH_FILE?.trim();
+  return `${configuredFile || auth.sourceFile || ""}\n${auth.refreshToken ?? ""}`;
+}
+
+async function refreshAntigravityAuth(
+  auth: AntigravityTokenSet | undefined
+): Promise<AntigravityTokenSet | undefined> {
+  const refreshToken = auth?.refreshToken;
+  if (!refreshToken || !auth) {
+    return undefined;
+  }
+  const key = refreshTokenKey(auth);
+  const failureBackoffUntil = antigravityRefreshFailures.get(key);
+  if (failureBackoffUntil !== undefined && failureBackoffUntil > Date.now()) {
+    return undefined;
+  }
+  const inFlight = antigravityRefreshInFlight.get(key);
+  if (inFlight) {
+    return (await inFlight).auth;
+  }
+  const refresh = refreshAntigravityToken(refreshToken, auth?.sourceFile)
+    .then((outcome) => {
+      if (outcome.auth) {
+        antigravityRefreshFailures.delete(key);
+      } else {
+        antigravityRefreshFailures.set(key, Date.now() + antigravityRefreshFailureBackoffMs);
+      }
+      return outcome;
+    })
+    .finally(() => antigravityRefreshInFlight.delete(key));
+  antigravityRefreshInFlight.set(key, refresh);
+  return (await refresh).auth;
+}
+
+async function refreshAntigravityToken(
+  refreshToken: string,
+  sourceFile?: string
+): Promise<AntigravityRefreshOutcome> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), antigravityRefreshTimeoutMs);
+  try {
+    const response = await fetchWithSystemProxy(
+      process.env.CCR_ANTIGRAVITY_OAUTH_TOKEN_ENDPOINT?.trim() || antigravityOauthTokenEndpoint,
+      {
+        body: new URLSearchParams({
+          client_id: process.env.CCR_ANTIGRAVITY_OAUTH_CLIENT_ID?.trim() || antigravityOauthClientId,
+          client_secret:
+            process.env.CCR_ANTIGRAVITY_OAUTH_CLIENT_SECRET?.trim() || antigravityOauthClientSecret,
+          grant_type: "refresh_token",
+          refresh_token: refreshToken
+        }),
+        headers: {
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        signal: controller.signal
+      }
+    );
+    const text = await response.text();
+    if (!response.ok) {
+      return {};
+    }
+    const payload = parseRecord(text);
+    const accessToken = readString(payload?.access_token);
+    if (!accessToken) {
+      return {};
+    }
+    const auth = writeAntigravityRefreshedAuth(sourceFile, {
+      accessToken,
+      expiresInMs: (readNumber(payload?.expires_in) ?? 3600) * 1000,
+      idToken: readString(payload?.id_token),
+      refreshToken: readString(payload?.refresh_token) || refreshToken,
+      scope: readString(payload?.scope)
+    });
+    return { auth };
+  } catch {
+    return {};
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function writeAntigravityRefreshedAuth(
+  sourceFile: string | undefined,
+  refreshed: {
+    accessToken: string;
+    expiresInMs: number;
+    idToken?: string;
+    refreshToken: string;
+    scope?: string;
+  }
+): AntigravityTokenSet {
+  const file = sourceFile?.trim() || antigravityCredentialFile();
+  const record: Record<string, unknown> = {
+    ...(readJsonRecord(file) ?? {}),
+    access_token: refreshed.accessToken,
+    expiry_date: Date.now() + refreshed.expiresInMs,
+    refresh_token: refreshed.refreshToken
+  };
+  if (refreshed.idToken) {
+    record.id_token = refreshed.idToken;
+  }
+  if (refreshed.scope) {
+    record.scope = refreshed.scope;
+  }
+  // A escrita pode falhar (fs somente leitura), mas o token segue válido em
+  // memória e o próximo ciclo apenas refaz o refresh.
+  try {
+    writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  } catch {}
+  return {
+    accessToken: refreshed.accessToken,
+    expiryDate: record.expiry_date as number,
+    idToken: refreshed.idToken,
+    refreshToken: refreshed.refreshToken,
+    scope: refreshed.scope,
+    sourceFile: file
+  };
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 function liveAntigravityAuth(sourceFile?: string): AntigravityTokenSet | undefined {

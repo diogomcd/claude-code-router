@@ -139,7 +139,7 @@ test("Antigravity resolve returns a live token without touching the network", as
   });
 });
 
-test("Antigravity resolve does not refresh or rewrite expired credentials", async () => {
+test("Antigravity resolve refreshes an expired file token and rewrites the credential file", async () => {
   await withAntigravityHome(async (home) => {
     const file = writeCredentials(home, {
       access_token: "stale-access-token",
@@ -149,18 +149,97 @@ test("Antigravity resolve does not refresh or rewrite expired credentials", asyn
     });
 
     await withStubbedFetch(
+      (_call, request) => {
+        assert.equal(request.url, "https://oauth2.googleapis.com/token");
+        assert.equal(
+          String(request.init?.body ?? ""),
+          "client_id=681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+            + "&client_secret=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"
+            + "&grant_type=refresh_token&refresh_token=antigravity-refresh-token"
+        );
+        return new Response(JSON.stringify({
+          access_token: "refreshed-access-token",
+          expires_in: 3599,
+          id_token: "refreshed-id-token",
+          scope: "https://www.googleapis.com/auth/cloud-platform"
+        }), { headers: { "content-type": "application/json" }, status: 200 });
+      },
+      async (calls) => {
+        const auth = await resolveAntigravityAuth();
+        assert.equal(calls.length, 1);
+        assert.equal(auth?.accessToken, "refreshed-access-token");
+        assert.equal(auth?.refreshToken, "antigravity-refresh-token");
+        assert.equal(auth?.sourceFile, file);
+        assert.ok((auth?.expiryDate ?? 0) > Date.now());
+        const rewritten = JSON.parse(readFileSync(file, "utf8"));
+        assert.equal(rewritten.access_token, "refreshed-access-token");
+        assert.equal(rewritten.refresh_token, "antigravity-refresh-token");
+        assert.equal(rewritten.foo, "bar");
+      }
+    );
+  });
+});
+
+test("Antigravity resolve keeps returning undefined for expired credentials without a refresh token", async () => {
+  await withAntigravityHome(async (home) => {
+    const file = writeCredentials(home, {
+      access_token: "stale-access-token",
+      expiry_date: pastExpiryMs
+    });
+
+    await withStubbedFetch(
       () => {
-        throw new Error("Antigravity must not refresh credentials");
+        throw new Error("Antigravity must not refresh without a refresh token");
       },
       async (calls) => {
         assert.equal(await resolveAntigravityAuth(), undefined);
         assert.equal(calls.length, 0);
         assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), {
           access_token: "stale-access-token",
-          expiry_date: pastExpiryMs,
-          foo: "bar",
-          refresh_token: "antigravity-refresh-token"
+          expiry_date: pastExpiryMs
         });
+      }
+    );
+  });
+});
+
+test("Antigravity resolve backs off after a failed refresh instead of hammering the token endpoint", async () => {
+  await withAntigravityHome(async (home) => {
+    writeCredentials(home, {
+      access_token: "stale-access-token",
+      expiry_date: pastExpiryMs,
+      refresh_token: "antigravity-refresh-token"
+    });
+
+    await withStubbedFetch(
+      () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }),
+      async (calls) => {
+        assert.equal(await resolveAntigravityAuth(), undefined);
+        assert.equal(await resolveAntigravityAuth(), undefined);
+        assert.equal(calls.length, 1);
+      }
+    );
+  });
+});
+
+test("Antigravity resolve returns the in-flight refresh once for concurrent callers", async () => {
+  await withAntigravityHome(async (home) => {
+    writeCredentials(home, {
+      access_token: "stale-access-token",
+      expiry_date: pastExpiryMs,
+      refresh_token: "antigravity-refresh-token"
+    });
+
+    await withStubbedFetch(
+      () => new Response(JSON.stringify({ access_token: "refreshed-access-token", expires_in: 3599 }), {
+        headers: { "content-type": "application/json" },
+        status: 200
+      }),
+      async (calls) => {
+        const [first, second] = await Promise.all([resolveAntigravityAuth(), resolveAntigravityAuth()]);
+        assert.equal(calls.length, 1);
+        assert.equal(first?.accessToken, "refreshed-access-token");
+        assert.equal(second?.accessToken, "refreshed-access-token");
       }
     );
   });

@@ -237,12 +237,21 @@ test("Antigravity local agent auth hook injects the live Bearer token and drops 
   });
 });
 
-test("Antigravity local agent auth hook rejects an expired token instead of using the imported token", async (t) => {
+test("Antigravity local agent auth hook refreshes an expired token instead of using the imported token", async (t) => {
   await withAntigravityHome(t, async (antigravityHome) => {
     writeAntigravityAuth(antigravityHome, {
       access_token: "expired-antigravity-access-token",
       expiry_date: Date.now() - 1,
       refresh_token: "antigravity-refresh-token"
+    });
+
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      access_token: "refreshed-antigravity-access-token",
+      expires_in: 3600
+    }), { headers: { "content-type": "application/json" }, status: 200 });
+    t.after(() => {
+      globalThis.fetch = previousFetch;
     });
 
     const [hook] = createGatewayPlugin({
@@ -262,8 +271,9 @@ test("Antigravity local agent auth hook rejects an expired token instead of usin
       }
     });
 
-    assert.equal(authResult.ok, false);
-    assert.equal(authResult.error, "Antigravity access token was not found.");
+    assert.equal(authResult.ok, true);
+    assert.equal(authResult.value.headers.authorization, "Bearer refreshed-antigravity-access-token");
+    assert.equal(authResult.value.headers["x-api-key"], undefined);
   });
 });
 
