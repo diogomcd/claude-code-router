@@ -40,6 +40,7 @@ import { parseJsonObjectSafe, serializeJsonBody, takeJsonObject } from "@ccr/cor
 import { createGatewayModelsResponse, prepareClaudeAppDiscoveredModelRequest, prepareClaudeCodeDiscoveredModelRequest, shouldServeGatewayModelsResponse } from "@ccr/core/gateway/features/model-discovery";
 import { resolveProviderLogName, resolveResponseProviderProtocol, sanitizeHeaderValue } from "@ccr/core/providers/runtime-topology";
 import { createBodySampler, requestLogSampled, shouldRecordRequestLogs } from "@ccr/core/observability/raw-trace-sync";
+import { createTpsMeter, tpsMeteringStream } from "@ccr/core/observability/tps-meter";
 import { RequestRouteTraceRecorder } from "@ccr/core/observability/route-trace";
 import { coreGatewayUsageAttributionConfig } from "@ccr/core/gateway/core-runtime/config-compiler";
 import { providerModelPricingForUsage } from "@ccr/core/models/pricing-service";
@@ -909,9 +910,15 @@ export class GatewayRequestPipeline {
       }
 
       const upstreamBody = Readable.fromWeb(upstreamResponse.body as unknown as import("node:stream/web").ReadableStream);
+      const tpsMeter = createTpsMeter({
+        model: routedModel,
+        requestStartedAt: startedAt,
+        sessionIdHeader: request.headers["x-claude-code-session-id"]
+      });
+      const meteredBody = tpsMeter ? tpsMeteringStream(upstreamBody, tpsMeter) : upstreamBody;
       const patchedResponseBody = codexApplyPatchBridgeActive
-        ? codexApplyPatchBridgeResponseStream(upstreamBody, responseHeaders)
-        : upstreamBody;
+        ? codexApplyPatchBridgeResponseStream(meteredBody, responseHeaders)
+        : meteredBody;
       const multiAgentResponseBody = codexMultiAgentBridgeActive
         ? codexMultiAgentBridgeResponseStream(patchedResponseBody, responseHeaders)
         : patchedResponseBody;
@@ -945,13 +952,14 @@ export class GatewayRequestPipeline {
       const clientResponseBody = rewriteAnthropicResponseModel && clientVisibleResponseModel
         ? rewriteAnthropicMessageStartModelStream(toolNameRepairedBody, clientVisibleResponseModel)
         : toolNameRepairedBody;
-      const responseStreams = uniqueStreams([upstreamBody, patchedResponseBody, multiAgentResponseBody, hostedWebSearchResponseBody, responseBody, toolNameRepairedBody, clientResponseBody]);
+      const responseStreams = uniqueStreams([upstreamBody, meteredBody, patchedResponseBody, multiAgentResponseBody, hostedWebSearchResponseBody, responseBody, toolNameRepairedBody, clientResponseBody]);
       const sampler = createBodySampler();
       const sseErrorDetector = createSseErrorDetector(responseHeaders.get("content-type") ?? undefined);
       let streamDetectedError: string | undefined;
       let upstreamStreamEnded = false;
       let logRecorded = false;
       const writeStreamLog = (error?: string) => {
+        tpsMeter?.finish();
         if (logRecorded) {
           return;
         }
@@ -1008,6 +1016,7 @@ export class GatewayRequestPipeline {
       });
       clientResponseBody.once("end", () => {
         upstreamStreamEnded = true;
+        tpsMeter?.finish();
         streamDetectedError ??= sseErrorDetector.finish();
         if (responseCompleted || response.writableEnded) {
           writeStreamLog();
