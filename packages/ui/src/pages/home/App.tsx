@@ -1348,11 +1348,13 @@ function App() {
 
     providerProbeRequestId.current += 1;
     const requestId = providerProbeRequestId.current;
+    const existingProvider = providerEditIndex === undefined ? undefined : draftConfig.Providers[providerEditIndex];
     const candidates = providerProbeCandidates(providerDraft).filter(isProviderProbeCandidateReady);
     const draftProbeApiKey = providerConnectivityApiKeyFromDraft(providerDraft);
     const shouldDiscoverModels = Boolean(draftProbeApiKey);
     const probeMode = shouldDiscoverModels ? "models" : "protocols";
     const probeApiKey = shouldDiscoverModels ? draftProbeApiKey : "";
+    const providerPlugins = providerConnectivityProviderPlugins(providerDraft, draftConfig.providerPlugins, existingProvider);
     const inputKey = providerProbeInputKey(candidates, probeApiKey, []);
 
     setProviderProbeError("");
@@ -1363,7 +1365,7 @@ function App() {
     setProviderProbeLoading(true);
 
     const timer = window.setTimeout(() => {
-      void probeProviderCandidates(candidates, probeApiKey, [], { mode: probeMode })
+      void probeProviderCandidates(candidates, probeApiKey, [], { mode: probeMode, providerPlugins })
         .then((result) => {
           if (providerProbeRequestId.current !== requestId) {
             return;
@@ -1416,7 +1418,7 @@ function App() {
         setProviderProbeLoading(false);
       }
     };
-  }, [activeView, onboardingStep, providerAddOpen, providerDraft.apiKey, providerDraft.baseUrl, providerDraft.credentialMode, providerDraft.credentials, providerDraft.presetId, providerDraft.protocol, providerDraft.protocolDetectionMode, providerDraft.providerPlugins]);
+  }, [activeView, draftConfig.Providers, draftConfig.providerPlugins, onboardingStep, providerAddOpen, providerDraft.apiKey, providerDraft.baseUrl, providerDraft.credentialMode, providerDraft.credentials, providerDraft.name, providerDraft.presetId, providerDraft.protocol, providerDraft.protocolDetectionMode, providerDraft.providerPlugins, providerEditIndex]);
 
   async function refreshProviderModels(): Promise<void> {
     if (providerProbeLoading) {
