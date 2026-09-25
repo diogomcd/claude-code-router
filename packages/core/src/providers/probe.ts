@@ -16,10 +16,10 @@ import { codexDefaultBaseUrl, readCodexAuth } from "@ccr/core/agents/local-provi
 import { readClaudeCodeOauth } from "@ccr/core/agents/local-providers/claude-code";
 import { opencodeCatalogProtocolModelMap } from "@ccr/core/agents/local-providers/opencode";
 import { localAgentProviderApiKey } from "@ccr/core/agents/local-providers/shared";
-import { claudeCodeOauthBetaHeader, claudeCodeOauthRequiredBeta } from "@ccr/core/gateway/internal/shared";
+import { claudeCodeOauthBetaHeader } from "@ccr/core/gateway/internal/shared";
 import { findProviderPresetByBaseUrl, providerApiKeySafetyIssue } from "@ccr/core/providers/presets/index";
 import { getProviderCatalogModels } from "@ccr/core/providers/model-catalog";
-import { isLocalClaudeCodeOauthProviderPlugin, mergeAnthropicBetaValues } from "@ccr/core/providers/oauth-plugin";
+import { claudeCodeOauthRequestHeaders, isLocalClaudeCodeOauthProviderPlugin } from "@ccr/core/providers/oauth-plugin";
 import { fetchWithSystemProxy } from "@ccr/core/proxy/system-proxy-fetch";
 import {
   compactProviderUrl,
@@ -945,12 +945,14 @@ async function providerProbeAuthRequest(
   const liveClaudeCodeAccessToken = providerProbeLiveClaudeCodeOauth(apiKey, providerPlugins);
   if (liveClaudeCodeAccessToken) {
     const headers = new Headers(request.init.headers);
-    headers.set("authorization", `Bearer ${liveClaudeCodeAccessToken}`);
     headers.delete("x-api-key");
-    headers.set(claudeCodeOauthBetaHeader, mergeAnthropicBetaValues(
-      headers.get(claudeCodeOauthBetaHeader) ?? undefined,
-      claudeCodeOauthRequiredBeta
-    ));
+    const authHeaders = claudeCodeOauthRequestHeaders(
+      liveClaudeCodeAccessToken,
+      headers.get(claudeCodeOauthBetaHeader) ?? undefined
+    );
+    for (const [name, value] of Object.entries(authHeaders)) {
+      headers.set(name, value);
+    }
     request = {
       ...request,
       init: {
