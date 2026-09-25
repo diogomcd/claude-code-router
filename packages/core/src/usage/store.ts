@@ -8,7 +8,7 @@ import { REQUEST_LOGS_DB_FILE, USAGE_DB_FILE } from "@ccr/core/config/constants"
 import { estimateUsageCostUsd, providerModelPricingForUsage } from "@ccr/core/models/pricing-service";
 import { createBetterSqliteDatabase, type BetterSqliteDatabase } from "@ccr/core/storage/sqlite-native";
 import { normalizeUsageInputTokens } from "@ccr/core/usage/normalization";
-import { resolveUsageModelAttribution } from "@ccr/core/usage/model-attribution";
+import { isKnownProviderSelector, resolveUsageModelAttribution } from "@ccr/core/usage/model-attribution";
 import type {
   AppConfig,
   GatewayProviderProtocol,
@@ -17,6 +17,7 @@ import type {
   UsageStatsFilter,
   UsageSeriesPoint,
   UsageStatsRange,
+  UsageStatsResetResult,
   UsageStatsSnapshot,
   UsageTotals
 } from "@ccr/core/contracts/app";
@@ -111,6 +112,7 @@ type UsageSnapshot = UsageNumbers & {
 
 const usageEvents = new EventEmitter();
 const usageStatsRanges = new Set<UsageStatsRange>(["today", "24h", "7d", "30d"]);
+const usageStatsResetAtKey = "usage_stats_reset_at";
 const emptyTotals: UsageTotals = {
   avgDurationMs: 0,
   cacheRatio: 0,
@@ -255,7 +257,13 @@ export class UsageStore {
       path: input.path,
       client: input.client,
       provider,
-      pricing: providerModelPricingForUsage(input.config, provider, model),
+      // Price the model that actually served the request. After a rewrite or
+      // fallback the display model is still the requested alias.
+      pricing: providerModelPricingForUsage(
+        input.config,
+        provider,
+        fallbackAttribution.model ?? input.fallbackModel ?? model
+      ),
       credentialId: readCredentialId(input.responseHeaders),
       requestId: input.requestId,
       statusCode: input.statusCode,
@@ -302,6 +310,25 @@ export class UsageStore {
     return readUsageTotals(database, buildUsageWhereClause(since, filter, options));
   }
 
+  async resetStatistics(): Promise<UsageStatsResetResult> {
+    const database = await this.getDatabase();
+    const resetAt = new Date().toISOString();
+    let deletedEvents = 0;
+
+    database.transaction(() => {
+      const result = database.prepare("DELETE FROM usage_events").run();
+      deletedEvents = Number(result.changes);
+      database.prepare(`
+        INSERT INTO usage_metadata (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(usageStatsResetAtKey, resetAt);
+    })();
+
+    usageEvents.emit("recorded");
+    return { deletedEvents, resetAt };
+  }
+
   private async getDatabase(): Promise<SqlDatabase> {
     if (this.database) {
       return this.database;
@@ -342,6 +369,10 @@ export class UsageStore {
       CREATE INDEX IF NOT EXISTS usage_events_model_idx ON usage_events(model);
       CREATE INDEX IF NOT EXISTS usage_events_path_idx ON usage_events(path);
       CREATE INDEX IF NOT EXISTS usage_events_request_id_idx ON usage_events(request_id);
+      CREATE TABLE IF NOT EXISTS usage_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
     ensureUsageSchema(database);
 
@@ -354,14 +385,15 @@ export class UsageStore {
     if (!requestLogDbFile || !existsSync(requestLogDbFile)) {
       return;
     }
+    const backfillSince = usageBackfillSinceAfterReset(database, since);
 
     let tempRequestLogDbFile: string | undefined;
     try {
       try {
-        this.backfillFromAttachedRequestLog(database, requestLogDbFile, since);
+        this.backfillFromAttachedRequestLog(database, requestLogDbFile, backfillSince);
       } catch {
         tempRequestLogDbFile = copySqliteDatabaseToTemp(requestLogDbFile);
-        this.backfillFromAttachedRequestLog(database, tempRequestLogDbFile, since);
+        this.backfillFromAttachedRequestLog(database, tempRequestLogDbFile, backfillSince);
       }
       this.requestLogBackfillFailureLogged = false;
     } catch (error) {
@@ -496,6 +528,15 @@ export async function getUsageStats(range?: UsageStatsRange | null, filter?: Usa
   }
 }
 
+export async function resetOverviewStatistics(): Promise<UsageStatsResetResult> {
+  try {
+    return await usageStore.resetStatistics();
+  } catch (error) {
+    console.warn(`[usage] Failed to reset overview statistics: ${formatError(error)}`);
+    throw error;
+  }
+}
+
 export async function getTodayUsageTotals(filter?: UsageStatsFilter | null, options?: UsageStatsQueryOptions | null): Promise<UsageTotals> {
   try {
     return await usageStore.getTotalsSince(floorDay(new Date()), filter, options);
@@ -522,6 +563,18 @@ export async function recordGatewayUsageCapture(input: UsageCaptureInput): Promi
   }
 }
 
+export async function recordGatewayUsageCaptureIfMissing(input: UsageCaptureInput): Promise<void> {
+  try {
+    const requestId = input.requestId?.trim();
+    if (requestId && await usageStore.hasRequestId(requestId)) {
+      return;
+    }
+    await usageStore.recordCapture(input);
+  } catch (error) {
+    console.warn(`[usage] Failed to record usage: ${formatError(error)}`);
+  }
+}
+
 function resolveUsageResponseModelAttribution(
   config: Pick<AppConfig, "Providers" | "virtualModelProfiles"> | undefined,
   model: string | undefined
@@ -530,6 +583,18 @@ function resolveUsageResponseModelAttribution(
   if (decodedClaudeRouteModel) {
     const attribution = resolveUsageModelAttribution(config, decodedClaudeRouteModel);
     return !config || attribution.provider ? attribution : {};
+  }
+  if (config && model && isKnownProviderSelector(config, model)) {
+    // The gateway rewrites the response model back to the selector the client
+    // requested, so a "provider/model" string here is a client-visible route
+    // selector, not the physical model. Attribute through the selector so
+    // per-model stats aggregate on the bare model name the provider is
+    // configured with; physical echoes (unknown provider or no slash) still
+    // fall through and are kept verbatim.
+    const attribution = resolveUsageModelAttribution(config, model);
+    if (attribution.provider) {
+      return attribution;
+    }
   }
   return resolveUsageModelAttribution(config, model, { physicalModel: true });
 }
@@ -597,6 +662,23 @@ function configureSqliteDatabase(database: SqlDatabase): void {
 
 function queryRows(database: SqlDatabase, sql: string, params: SqlValue[] = []): Record<string, SqlValue>[] {
   return database.prepare(sql).all(...params) as Record<string, SqlValue>[];
+}
+
+function usageBackfillSinceAfterReset(database: SqlDatabase, since: Date): Date {
+  const resetAt = readUsageStatsResetAt(database);
+  if (!resetAt || resetAt.getTime() < since.getTime()) {
+    return since;
+  }
+  return new Date(resetAt.getTime() + 1);
+}
+
+function readUsageStatsResetAt(database: SqlDatabase): Date | undefined {
+  const row = queryRows(database, "SELECT value FROM usage_metadata WHERE key = ? LIMIT 1", [usageStatsResetAtKey])[0];
+  if (typeof row?.value !== "string") {
+    return undefined;
+  }
+  const date = new Date(row.value);
+  return Number.isFinite(date.getTime()) ? date : undefined;
 }
 
 function sqlString(value: string): string {

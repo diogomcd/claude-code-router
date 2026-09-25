@@ -22,6 +22,7 @@ import { retryDelayAfterNetworkError, retryDelayAfterStatus, shouldFallbackAfter
 import { claudeCodeOauthBetaHeader, claudeCodeOauthRequiredBeta, UpstreamRequestError } from "@ccr/core/gateway/internal/shared";
 import type { ApiKeyLimitUsage, ProviderCredentialRoutingTarget, UpstreamAttempt, UpstreamFailedAttempt, UpstreamFetchResult } from "@ccr/core/gateway/internal/shared";
 import type { RouteTraceObserver } from "@ccr/core/observability/route-trace";
+import { monotonicNowMs } from "@ccr/core/observability/stream-experience";
 
 const providerCredentialSpilloverThreshold = 0.8;
 const openRouterDiscountModelHeader = "x-ccr-openrouter-discount-model";
@@ -431,6 +432,7 @@ export async function fetchUpstreamWithFallback(input: {
       attempt.target?.kind === "provider" ? attempt.target.provider.name : undefined
     );
     const attemptStartedAt = Date.now();
+    const attemptStartedAtMonoMs = monotonicNowMs();
     input.trace?.capture({
       attempt: attemptNumber,
       changes: [
@@ -502,7 +504,9 @@ export async function fetchUpstreamWithFallback(input: {
           statusCode: response.status
         });
         recordProviderCredentialOutcome(input.config, input.method, attempt, response.status, response.headers);
-        await drainResponseBody(response);
+        // Failed response bodies may never finish. Start cancellation without
+        // waiting for upstream cleanup before trying the next provider.
+        void cancelResponseBody(response);
         if (delayMs > 0) {
           await delay(delayMs, input.signal);
         }
@@ -527,7 +531,10 @@ export async function fetchUpstreamWithFallback(input: {
       return {
         attempt,
         failedAttempts,
-        response
+        response,
+        timing: {
+          attemptStartedAtMonoMs
+        }
       };
     } catch (error) {
       const message = formatError(error);
@@ -808,6 +815,9 @@ function usageAwareOpenAiChatAttemptBody(input: {
       : undefined
   );
   if (providerProtocol !== "openai_chat_completions" && providerProtocol !== "openai_responses") {
+    return input.body;
+  }
+  if (providerProtocol === "openai_responses" && clientProtocol === "openai_responses") {
     return input.body;
   }
   const sanitizedBody = stripUnsupportedOpenAiRequestParameters(input.body);
@@ -1164,20 +1174,11 @@ function isRouteTraceChange(value: RequestRouteTraceChange | undefined): value i
 }
 
 
-async function drainResponseBody(response: Response): Promise<void> {
-  try {
-    await response.arrayBuffer();
-  } catch {
-    // The failed attempt is already being skipped; body drain errors should not block the next attempt.
-  }
-}
-
-
 export async function cancelResponseBody(response: Response): Promise<void> {
   try {
     await response.body?.cancel();
   } catch {
-    // The client already disconnected; best-effort upstream cleanup must not mask that expected path.
+    // Cleanup after a failed attempt or client disconnect must not mask the original outcome.
   }
 }
 

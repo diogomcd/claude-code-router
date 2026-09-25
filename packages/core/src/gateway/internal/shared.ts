@@ -32,6 +32,15 @@ export const claudeAppGatewayModelRouteOptions: ClaudeAppGatewayModelRouteOption
   supportsOneMillionContext: (model) => Boolean(findModelCatalogEntry(model)?.limits?.supports1MContext)
 };
 
+export const sdkCompatibleTokenHeaderNames = [
+  "authorization",
+  "x-api-key",
+  "api-key",
+  "x-goog-api-key",
+  "x-mcp-key",
+  "x-codex-access-token"
+] as const;
+
 
 export type ApiKeyAuthorizationResult =
   | { ok: true; apiKey?: ApiKeyConfig }
@@ -197,6 +206,9 @@ export type UpstreamFetchResult = {
   attempt: UpstreamAttempt;
   failedAttempts: UpstreamFailedAttempt[];
   response: Response;
+  timing: {
+    attemptStartedAtMonoMs: number;
+  };
 };
 
 

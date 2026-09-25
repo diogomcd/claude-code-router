@@ -34,8 +34,10 @@ import {
   VirtualModelDraft, virtualModelProfileFromDraft, virtualModelProfilesUseMediaTools
 } from "./shared/index";
 import { preserveEqualPollingSnapshot, startVisiblePolling } from "./shared/polling";
+import { configsEqual, createConfigSaveQueue, mergeSavedApiKeys, reconcileSavedConfig } from "./shared/config-persistence";
+import { renameProviderReferences } from "./shared/provider-references";
 import {
-  AppDialogStack, LightToast, MainLayout, OnboardingLayout, shouldCheckForUpdateOnOpen
+  AppDialogStack, FeedbackStack, LightToast, MainLayout, OnboardingLayout, PersistenceFeedback, shouldCheckForUpdateOnOpen
 } from "./components/index";
 import { hasAvailableGatewayModels } from "@ccr/core/contracts/app";
 
@@ -51,6 +53,8 @@ type ProfileActionBusy = {
   profileId: string;
   surface: ProfileOpenSurface;
 };
+
+type ConfigSaveFeedbackTarget = "global" | "form" | "silent";
 
 const providerNamePlaceholder = "__CCR_PROVIDER_NAME__";
 const providerNameSlugPlaceholder = "__CCR_PROVIDER_NAME_SLUG__";
@@ -72,6 +76,14 @@ function localCodexProviderDraftProbeKey(draft: AddProviderDraft): string {
     normalizeProviderBaseUrl(draft.baseUrl),
     draft.protocol
   ]);
+}
+
+function overviewUsageStatsFilter(range: UsageStatsRange, providerFilter: string, modelFilter: string): UsageStatsFilter {
+  return {
+    ...(range === "today" ? { includeProxy: true } : {}),
+    ...(providerFilter ? { provider: providerFilter } : {}),
+    ...(modelFilter ? { model: modelFilter } : {})
+  };
 }
 
 function materializeProviderPluginTemplates(
@@ -187,7 +199,11 @@ function App() {
   const [gatewayActionBusy, setGatewayActionBusy] = useState(false);
   const [gatewayActionTargetActive, setGatewayActionTargetActive] = useState<boolean>();
   const [, setActionMessage] = useState("");
-  const [, setActionError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [configSaveState, setConfigSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [configSaveError, setConfigSaveError] = useState("");
+  const [autoSaveResumeRevision, setAutoSaveResumeRevision] = useState(0);
+  const [runtimeDisconnected, setRuntimeDisconnected] = useState(false);
   const [profileActionError, setProfileActionError] = useState("");
   const [profileAddOpen, setProfileAddOpen] = useState(false);
   const [profileAgentTab, setProfileAgentTab] = useState<ProfileConfig["agent"]>("claude-code");
@@ -277,6 +293,7 @@ function App() {
   const [providerAccountSnapshots, setProviderAccountSnapshots] = useState<ProviderAccountSnapshot[]>([]);
   const [providerAccountRefreshing, setProviderAccountRefreshing] = useState(false);
   const updateActionBusyRef = useRef(false);
+  const usageStatsRequestId = useRef(0);
   const resolvedLanguage = languagePreference === "system" ? systemLanguage : languagePreference;
   const copy = appCopy[resolvedLanguage];
   const t = useMemo(() => (value: string) => translateText(copy, value), [copy]);
@@ -354,6 +371,9 @@ function App() {
       await Promise.allSettled([
         ccr.getGatewayStatus().then((next) => {
           setGatewayStatus((current) => preserveEqualPollingSnapshot(current, next));
+          setRuntimeDisconnected(false);
+        }).catch(() => {
+          setRuntimeDisconnected(true);
         }),
         ccr.getProxyStatus().then((next) => {
           setProxyStatus((current) => preserveEqualPollingSnapshot(current, next));
@@ -472,16 +492,13 @@ function App() {
 
     let cancelled = false;
     const refreshUsageStats = () => {
-      const filter: UsageStatsFilter = {
-        ...(usageRange === "today" ? { includeProxy: true } : {}),
-        ...(usageProviderFilter ? { provider: usageProviderFilter } : {}),
-        ...(usageModelFilter ? { model: usageModelFilter } : {})
-      };
+      const requestId = ++usageStatsRequestId.current;
+      const filter = overviewUsageStatsFilter(usageRange, usageProviderFilter, usageModelFilter);
       void window.ccr?.getUsageStats(usageRange, filter).then((snapshot) => {
-        if (!cancelled) {
+        if (!cancelled && requestId === usageStatsRequestId.current) {
           setUsageStats(snapshot);
         }
-      });
+      }).catch(() => undefined);
     };
     const stopPolling = startVisiblePolling(refreshUsageStats, 5000);
     return () => {
@@ -730,6 +747,15 @@ function App() {
     [agentAnalysisEnabled, networkCaptureEnabled]
   );
   const autoSaveRequestId = useRef(0);
+  const autoSaveTimer = useRef<number>();
+  const explicitSaveKey = useRef<string>();
+  const explicitConfigSaves = useRef(0);
+  const configSaveQueue = useRef(createConfigSaveQueue());
+  const apiKeySaveBusy = useRef(false);
+  const currentDraft = useRef(draftConfig);
+  const currentSaved = useRef(savedConfig);
+  currentDraft.current = draftConfig;
+  currentSaved.current = savedConfig;
   const themePreferenceRequestId = useRef(0);
   const onboardingProfileDraftSource = useRef("");
   const providerProbeRequestId = useRef(0);
@@ -860,40 +886,57 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!window.ccr || !dirty) {
+    if (!window.ccr || !dirty || explicitConfigSaves.current > 0) {
       return;
     }
 
-    const requestId = autoSaveRequestId.current + 1;
-    autoSaveRequestId.current = requestId;
     const configToSave = normalizeConfig({
       ...draftConfig,
       theme: themePreference
     });
+    if (explicitSaveKey.current === JSON.stringify(configToSave)) {
+      return;
+    }
+    const requestId = ++autoSaveRequestId.current;
+    setConfigSaveState("saving");
+    setConfigSaveError("");
     const options = deferProfileApplyOnSave ? { applyProfile: false } : undefined;
     const timer = window.setTimeout(() => {
-      void window.ccr?.saveConfig(configToSave, options)
-        .then((saved) => {
+      autoSaveTimer.current = undefined;
+      void enqueueConfigSave(configToSave, options)
+        .then(() => {
           if (autoSaveRequestId.current === requestId) {
-            syncConfigState(saved);
             setActionError("");
+            setConfigSaveState("saved");
           }
         })
         .catch((error) => {
           if (autoSaveRequestId.current === requestId) {
-            setActionError(formatError(error));
+            setConfigSaveError(formatError(error));
+            setConfigSaveState("error");
           }
         });
     }, 400);
+    autoSaveTimer.current = timer;
 
-    return () => window.clearTimeout(timer);
-  }, [dirty, draftConfig, deferProfileApplyOnSave, themePreference]);
+    return () => {
+      window.clearTimeout(timer);
+      if (autoSaveTimer.current === timer) autoSaveTimer.current = undefined;
+    };
+  }, [dirty, draftConfig, deferProfileApplyOnSave, themePreference, autoSaveResumeRevision]);
 
   function syncConfigState(config: AppConfig) {
     const normalized = normalizeConfig(config);
-    setSavedConfig(normalized);
-    setDraftConfig(normalized);
+    setConfigSnapshots(normalized, normalized);
     setThemePreference(normalized.theme || "system");
+  }
+
+  function setConfigSnapshots(saved: AppConfig, draft: AppConfig) {
+    const nextDraft = configsEqual(saved, draft) ? saved : draft;
+    currentSaved.current = saved;
+    currentDraft.current = nextDraft;
+    setSavedConfig(saved);
+    setDraftConfig(nextDraft);
   }
 
   function showToast(message: string) {
@@ -905,6 +948,24 @@ function App() {
       setToast(undefined);
       toastTimer.current = undefined;
     }, 1800);
+  }
+
+  async function resetOverviewStatistics() {
+    if (!window.ccr?.resetOverviewStatistics) {
+      throw new Error(t("Overview statistics reset is unavailable."));
+    }
+
+    usageStatsRequestId.current += 1;
+    await window.ccr.resetOverviewStatistics();
+    const requestId = ++usageStatsRequestId.current;
+    const snapshot = await window.ccr.getUsageStats(
+      usageRange,
+      overviewUsageStatsFilter(usageRange, usageProviderFilter, usageModelFilter)
+    );
+    if (requestId === usageStatsRequestId.current) {
+      setUsageStats(snapshot);
+    }
+    showToast(t("Overview statistics reset."));
   }
 
   function openUpdateDialog() {
@@ -984,24 +1045,26 @@ function App() {
   }
 
   function updateConfig(mutator: (config: AppConfig) => AppConfig) {
-    setDraftConfig((current) => {
-      const next = normalizeConfig(mutator(cloneConfig(current)));
-      return next;
-    });
+    setConfigDraft(mutator(cloneConfig(currentDraft.current)));
   }
 
   function buildConfigUpdate(mutator: (config: AppConfig) => AppConfig): AppConfig {
-    return normalizeConfig(mutator(cloneConfig(draftConfig)));
+    return normalizeConfig(mutator(cloneConfig(currentDraft.current)));
   }
 
   function setConfigDraft(config: AppConfig): AppConfig {
     const normalized = normalizeConfig(config);
+    currentDraft.current = normalized;
     setDraftConfig(normalized);
     return normalized;
   }
 
-  async function persistConfig(config: AppConfig, setError: (message: string) => void, options?: AppSaveConfigOptions): Promise<boolean> {
-    autoSaveRequestId.current += 1;
+  async function persistConfig(config: AppConfig, setError: (message: string) => void, options?: AppSaveConfigOptions, feedbackTarget: ConfigSaveFeedbackTarget = "global"): Promise<boolean> {
+    const requestId = ++autoSaveRequestId.current;
+    if (autoSaveTimer.current !== undefined) {
+      window.clearTimeout(autoSaveTimer.current);
+      autoSaveTimer.current = undefined;
+    }
     const configWithTheme = normalizeConfig({
       ...config,
       theme: themePreference
@@ -1011,16 +1074,58 @@ function App() {
       return true;
     }
 
+    const key = JSON.stringify(configWithTheme);
+    explicitSaveKey.current = key;
+    explicitConfigSaves.current += 1;
+    setError("");
+    const showSaveFeedback = feedbackTarget !== "silent";
+    if (showSaveFeedback) {
+      setConfigSaveState("saving");
+      setConfigSaveError("");
+    } else {
+      setConfigSaveState("idle");
+      setConfigSaveError("");
+    }
+    let committed = false;
     try {
       const saveOptions = options ?? (deferProfileApplyOnSave ? { applyProfile: false } : undefined);
-      const saved = await window.ccr.saveConfig(configWithTheme, saveOptions);
-      syncConfigState(saved);
+      await enqueueConfigSave(configWithTheme, saveOptions);
+      committed = true;
+      if (showSaveFeedback && (autoSaveRequestId.current === requestId || JSON.stringify(currentDraft.current) === key)) {
+        setConfigSaveState("saved");
+        setConfigSaveError("");
+      }
       setError("");
       return true;
     } catch (error) {
-      setError(formatError(error));
+      const message = formatError(error);
+      setError(message);
+      if (showSaveFeedback && autoSaveRequestId.current === requestId) {
+        setConfigSaveError(message);
+        setConfigSaveState(feedbackTarget === "form" ? "idle" : "error");
+      }
       return false;
+    } finally {
+      explicitConfigSaves.current -= 1;
+      if (explicitSaveKey.current === key) explicitSaveKey.current = undefined;
+      // A failed form leaves the global draft untouched, so changing a ref alone
+      // would never restart its cancelled autosave for unrelated pending edits.
+      if (explicitConfigSaves.current === 0 && currentDraft.current !== currentSaved.current && (committed || feedbackTarget === "form")) {
+        setAutoSaveResumeRevision((revision) => revision + 1);
+      }
     }
+  }
+
+  function enqueueConfigSave(config: AppConfig, options?: AppSaveConfigOptions): Promise<AppConfig> {
+    const baseDraft = currentDraft.current;
+    return configSaveQueue.current.run(
+      () => window.ccr!.saveConfig(config, options),
+      (saved) => {
+        const normalized = normalizeConfig(saved);
+        const draft = normalizeConfig(reconcileSavedConfig(baseDraft, currentDraft.current, normalized));
+        setConfigSnapshots(normalized, draft);
+      }
+    );
   }
 
   async function persistApiKeys(apiKeys: ApiKeyConfig[], setError: (message: string) => void): Promise<boolean> {
@@ -1029,17 +1134,29 @@ function App() {
       return false;
     }
 
+    if (apiKeySaveBusy.current) return false;
+    apiKeySaveBusy.current = true;
     try {
       if (!window.ccr.saveApiKeys) {
         throw new Error("This app build does not expose API key persistence. Rebuild and restart the Electron app.");
       }
-      const saved = await window.ccr.saveApiKeys(apiKeys);
-      syncConfigState(saved);
+      await configSaveQueue.current.run(
+        () => window.ccr!.saveApiKeys(apiKeys),
+        (saved) => {
+          const normalized = normalizeConfig(saved);
+          setConfigSnapshots(
+            mergeSavedApiKeys(currentSaved.current, normalized),
+            mergeSavedApiKeys(currentDraft.current, normalized)
+          );
+        }
+      );
       setError("");
       return true;
     } catch (error) {
       setError(formatError(error));
       return false;
+    } finally {
+      apiKeySaveBusy.current = false;
     }
   }
 
@@ -1087,7 +1204,6 @@ function App() {
       config.APIKEY = keys[0]?.key ?? "";
       return config;
     });
-    setConfigDraft(next);
     if (await persistApiKeys(next.APIKEYS, setApiKeyError)) {
       setApiKeyAddOpen(false);
       setCreatedApiKey(apiKey);
@@ -1111,7 +1227,6 @@ function App() {
       config.APIKEY = keys[0]?.key ?? "";
       return config;
     });
-    setConfigDraft(next);
     if (await persistApiKeys(next.APIKEYS, setApiKeyError)) {
       setApiKeyEditIndex(undefined);
     }
@@ -1124,7 +1239,6 @@ function App() {
       config.APIKEY = keys[0]?.key ?? "";
       return config;
     });
-    setConfigDraft(next);
     await persistApiKeys(next.APIKEYS, setApiKeyError);
   }
 
@@ -1756,10 +1870,9 @@ function App() {
       if (!config.preferredProvider) {
         config.preferredProvider = provider.name;
       }
-      return config;
+      return existingProvider ? renameProviderReferences(config, existingProvider.name, provider.name) : config;
     });
-    setConfigDraft(next);
-    if (await persistConfig(next, setProviderProbeError)) {
+    if (await persistConfig(next, setProviderProbeError, undefined, "form")) {
       setProviderEditIndex(undefined);
       setProviderImportOpen(false);
       setProviderImportPayload(undefined);
@@ -2408,6 +2521,13 @@ function App() {
     }));
   }
 
+  function changeTrayShowTokenRate(trayShowTokenRate: boolean) {
+    updateConfig((config) => ({
+      ...config,
+      trayShowTokenRate
+    }));
+  }
+
   function changeTrayBalanceProgress(config: TrayBalanceProgressConfig) {
     const trayBalanceProgress = normalizeTrayBalanceProgressConfig(config);
     updateConfig((current) => ({
@@ -2734,7 +2854,7 @@ function App() {
         saveError = message;
         setProfileActionError(message);
       };
-      if (!(await persistConfig(draftConfig, setSaveError))) {
+      if (!(await persistConfig(draftConfig, setSaveError, undefined, "silent"))) {
         if (!saveError) {
           setProfileActionError(t("Failed to save profile before opening."));
         }
@@ -2820,9 +2940,14 @@ function App() {
     setProfileOpenDialog((current) => current?.profile.id === profile.id
       ? { ...current, busy: "app", error: "" }
       : { busy: "app", mode: "choose", profile });
-    if (!(await persistConfig(draftConfig, setProfileActionError))) {
+    let saveError = "";
+    const setSaveError = (message: string) => {
+      saveError = message;
+      setProfileActionError(message);
+    };
+    if (!(await persistConfig(draftConfig, setSaveError, undefined, "silent"))) {
       setProfileOpenDialog((current) => current?.profile.id === profile.id
-        ? { ...current, busy: "", error: profileActionError || t("Failed to save profile before opening.") }
+        ? { ...current, busy: "", error: saveError || t("Failed to save profile before opening.") }
         : current);
       return;
     }
@@ -2950,9 +3075,8 @@ function App() {
         })()
       }
     }));
-    setConfigDraft(next);
     try {
-      if (!(await persistConfig(next, setProfileActionError, { applyProfile: true }))) {
+      if (!(await persistConfig(next, setProfileActionError, { applyProfile: true }, "form"))) {
         return false;
       }
       setProfileAddOpen(false);
@@ -3005,9 +3129,8 @@ function App() {
         }
       };
     });
-    setConfigDraft(next);
     try {
-      if (!(await persistConfig(next, setProfileActionError))) {
+      if (!(await persistConfig(next, setProfileActionError, undefined, "form"))) {
         return false;
       }
       setProfileEditIndex(undefined);
@@ -3054,6 +3177,19 @@ function App() {
     removeProfile(profileDeleteIndex);
     setProfileDeleteIndex(undefined);
   }
+
+  const persistenceFeedback = (
+    <PersistenceFeedback
+      actionError={actionError}
+      contained={!settingsOpen}
+      disconnected={runtimeDisconnected}
+      error={configSaveError}
+      inline={settingsOpen}
+      onDismissAction={() => setActionError("")}
+      onRetry={() => void persistConfig(draftConfig, setActionError)}
+      state={configSaveState}
+    />
+  );
 
   return (
     <AppI18nContext.Provider value={copy}>
@@ -3169,6 +3305,7 @@ function App() {
                   snapshot: agentAnalysis
                 },
                 overview: {
+                  onConfigureProviderAccounts: () => selectNavigationItem("providers"),
                   usageFilters: {
                     modelFilter: usageModelFilter,
                     providerFilter: usageProviderFilter,
@@ -3176,6 +3313,7 @@ function App() {
                     setModelFilter: setUsageModelFilter,
                     setProviderFilter: setUsageProviderFilter
                   },
+                  resetOverviewStatistics,
                   onWidgetsChange: changeOverviewWidgets,
                   overviewWidgets: normalizeOverviewWidgets(draftConfig.overviewWidgets),
                   providerAccounts: providerAccountSnapshots,
@@ -3416,6 +3554,7 @@ function App() {
               providers: draftConfig.Providers
             } : undefined}
             settings={settingsOpen ? {
+              saveFeedback: persistenceFeedback,
               appInfo,
               botAddRequestKey: settingsBotAddRequestKey,
               botConfigs: draftConfig.botConfigs,
@@ -3433,6 +3572,7 @@ function App() {
               onChangeToolHub: changeToolHubConfig,
               onChangeTrayBalanceProgress: changeTrayBalanceProgress,
               onChangeTrayIcon: changeTrayIconPreference,
+              onChangeTrayShowTokenRate: changeTrayShowTokenRate,
               onChangeTrayWidgets: changeTrayWidgets,
               onClose: () => setSettingsOpen(false),
               observability: draftConfig.observability,
@@ -3446,6 +3586,7 @@ function App() {
               providerAccountSnapshots,
               trayBalanceProgress: normalizeTrayBalanceProgressConfig(draftConfig.trayBalanceProgress),
               trayIconPreference: draftConfig.trayIcon || "random",
+              trayShowTokenRate: Boolean(draftConfig.trayShowTokenRate),
               traySupported,
               trayWidgets: normalizeTrayWidgets(draftConfig.trayWidgets ?? DEFAULT_TRAY_WIDGETS, draftConfig.trayWindowModules, draftConfig.trayComponentVariants),
               updateConfig
@@ -3480,7 +3621,10 @@ function App() {
               providers: draftConfig.Providers
             } : undefined}
           />
-          <LightToast toast={toast} />
+          <FeedbackStack>
+            {!settingsOpen ? persistenceFeedback : null}
+            <LightToast contained toast={toast} />
+          </FeedbackStack>
         </div>
       </LayoutGroup>
     </AppI18nContext.Provider>
